@@ -2,6 +2,24 @@
 
 qwery is a small and lightweight query builder based on asyncpg and pydantic.
 
+## why a query builder
+
+In my opinion query builders strike a great balance between the flexibility of raw SQL, the structure and safety of pre-crafted queries, and the comfortable data layer of an ORM.
+
+These benefits come with some downsides:
+
+- You lose some flexibility when crafting queries, especially when dealing with things like partial updates.
+- While the query builder interface does provide _some_ typing, its dynamic nature means it can never match the safety of pre-crafted queries with hand-written or generated types.
+- Complex queries returning non-standard data become unruly fast.
+
+## model, queries, helper pattern
+
+qwery works best with a model + queries + helper pattern, namely:
+
+- Models describe only data and how it is stored
+- Queries describe how models interact with the database
+- Helpers describe and implement the interaction _between_ models and the application (creation, fetching, etc)
+
 ## example
 
 ```py
