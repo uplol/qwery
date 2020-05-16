@@ -1,0 +1,5 @@
+.venv/
+.eggs/
+.vscode/
+.pytest_cache/
+/qwery.egg-info/
