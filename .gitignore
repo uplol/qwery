@@ -3,3 +3,5 @@
 .vscode/
 .pytest_cache/
 /qwery.egg-info/
+/build
+/dist
