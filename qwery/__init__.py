@@ -14,6 +14,7 @@ from typing import (
     List,
     Optional,
     Tuple,
+    Set,
 )
 from pydantic import BaseModel, ValidationError, create_model
 from pydantic.fields import ModelField
@@ -283,25 +284,37 @@ class Query(Generic[T]):
             self.model, f"UPDATE {self._table_name} SET {', '.join(updates)}", args, idx
         )
 
-    def insert(self) -> ExecuteQuery[T]:
-        def f(inst: Dict[str, Any]):
-            return inst.values()
+    def insert(
+        self, body: bool = False, ignore: Optional[Set[str]] = None
+    ) -> ExecuteQuery[T]:
+        if body:
+            assert ignore is None, "cannot use ignore with body = True"
 
-        camel = ""
-        for char in self.model.__name__:
-            if camel and char.isupper():
-                camel += "_" + char.lower()
-            else:
-                camel += char.lower()
+            def f(inst: Dict[str, Any]):
+                return inst.values()
 
-        f.__name__ = f"{camel}_splat"
+            camel = ""
+            for char in self.model.__name__:
+                if camel and char.isupper():
+                    camel += "_" + char.lower()
+                else:
+                    camel += char.lower()
 
-        args = {camel: Arg(self.model, f)}
+            f.__name__ = f"{camel}_splat"
+            fields = list(self.model.__fields__.keys())
+            args = {camel: Arg(self.model, f)}
+        else:
+            fields = [
+                k for k in self.model.__fields__.keys() if not ignore or k not in ignore
+            ]
 
-        fields = ", ".join(self.model.__fields__.keys())
-        values = ", ".join(f"${idx + 1}" for idx in range(len(self.model.__fields__)))
-        sql = f"INSERT INTO {self._table_name} ({fields}) VALUES ({values})"
-        return InsertQuery[T](self.model, sql, args, len(self.model.__fields__))
+            args = {}
+            for field in fields:
+                args[field] = Arg(_get_field_type(self.model.__fields__[field]), None)
+
+        values = ", ".join(f"${idx + 1}" for idx in range(len(fields)))
+        sql = f"INSERT INTO {self._table_name} ({', '.join(fields)}) VALUES ({values})"
+        return InsertQuery[T](self.model, sql, args, len(fields))
 
     def select(self, raw=None, alias=None) -> SelectQuery[T]:
         fields = raw or ", ".join(

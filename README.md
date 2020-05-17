@@ -38,7 +38,7 @@ class MyModel(BaseModel):
 
 
 class MyModelQueries:
-    create = Query(MyModel).insert().build()
+    create = Query(MyModel).insert(body=True).build()
     delete_by_id = Query(MyModel).delete().where("id = {.id}").build()
     get_by_id = Query(MyModel).select().where("id = {.id}").fetchone().build()
     get_all = Query(MyModel).select().fetchall().build()

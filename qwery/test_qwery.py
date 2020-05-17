@@ -57,3 +57,30 @@ async def test_validate_select_query():
     test_model_query = Query(ExampleModel).select().where("a = {.a}").fetchone()
     with pytest.raises(ValidationError):
         await test_model_query.build()(None, a="fuck")
+
+
+@pytest.mark.asyncio
+async def test_validate_insert_query():
+    test_model_query = Query(ExampleModel).insert(ignore={"b"})
+    with pytest.raises(ValidationError) as excinfo:
+        await test_model_query.build()(None, a=1, c="yeet")
+
+    assert excinfo.value.errors() == [
+        {
+            "loc": ("c",),
+            "msg": "value could not be parsed to a boolean",
+            "type": "type_error.bool",
+        }
+    ]
+
+    test_model_query = Query(ExampleModel).insert(body=True)
+    with pytest.raises(ValidationError) as excinfo:
+        await test_model_query.build()(None, a=1, c=1)
+
+    assert excinfo.value.errors() == [
+        {
+            "loc": ("example_model",),
+            "msg": "field required",
+            "type": "value_error.missing",
+        }
+    ]
