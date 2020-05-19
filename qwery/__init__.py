@@ -144,7 +144,20 @@ class FetchValQuery(Generic[T], BaseSubQuery[T]):
             parsed_kwargs = ArgsModel(**kwargs).dict()
             return await conn.fetchval(self.sql, *self.generate_sql_args(parsed_kwargs))
 
-        f.__name__ = "execute_fetch_one_query"
+        f.__name__ = "execute_fetch_val_query"
+        return f
+
+
+class TuplesQuery(Generic[T], BaseSubQuery[T]):
+    def build(self) -> Callable[..., Awaitable[Iterable[T]]]:
+        value: Any = {k: (v.type_, ...) for k, v in self.args.items()}
+        ArgsModel = create_model("FetchTuplesArgsModel", **value)
+
+        async def f(conn: Connection, **kwargs) -> Iterable[T]:
+            parsed_kwargs = ArgsModel(**kwargs).dict()
+            return await conn.fetch(self.sql, *self.generate_sql_args(parsed_kwargs))
+
+        f.__name__ = "execute_tuples_query"
         return f
 
 
@@ -194,6 +207,22 @@ class SelectQuery(Generic[T], BaseSubQuery[T]):
     def fetchall(self) -> FetchAllQuery[T]:
         return FetchAllQuery(self.model, self.sql, self.args.copy(), self.idx)
 
+    def tuples(self) -> TuplesQuery[T]:
+        return TuplesQuery(self.model, self.sql, self.args.copy(), self.idx)
+
+    def group_by(self, by) -> "SelectQuery[T]":
+        return SelectQuery[T](
+            self.model, self.sql.strip() + f" GROUP BY {by}", self.args.copy(), self.idx
+        )
+
+    def order_by(self, by, direction="ASC") -> "SelectQuery[T]":
+        return SelectQuery[T](
+            self.model,
+            self.sql.strip() + f" ORDER BY {by} {direction}",
+            self.args.copy(),
+            self.idx,
+        )
+
     def preper(self) -> PreperQuery[T]:
         return PreperQuery(self.model, self.sql, self.args.copy(), self.idx)
 
@@ -202,7 +231,7 @@ class SelectQuery(Generic[T], BaseSubQuery[T]):
             self.sql.strip()
             + f" JOIN {other_model.Meta.table_name} {other_model.Meta.table_name} ON {on}"
         )
-        return SelectQuery[T](self.model, sql, self.args, self.idx)
+        return SelectQuery[T](self.model, sql, self.args.copy(), self.idx)
 
 
 class DeleteQuery(Generic[T], BaseSubQuery[T]):
