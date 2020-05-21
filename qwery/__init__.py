@@ -37,7 +37,7 @@ T = TypeVar("T", bound=Model)
 
 
 def _get_field_type(field: ModelField):
-    type_ = field.type_
+    type_ = field.outer_type_
     if not field.required:
         type_ = Optional[type_]
     return type_
