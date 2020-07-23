@@ -220,10 +220,15 @@ class SelectQuery(Generic[T], BaseSubQuery[T]):
     def preper(self) -> PreperQuery[T]:
         return PreperQuery(self.model, self.sql, self.args.copy(), self.idx)
 
-    def join(self, other_model, on) -> "SelectQuery[T]":
+    def raw(self, raw) -> "SelectQuery[T]":
+        return SelectQuery[T](
+            self.model, self.sql.strip() + " " + raw, self.args.copy(), self.idx
+        )
+
+    def join(self, other_model, on, alias=None, direction=None) -> "SelectQuery[T]":
         sql = (
             self.sql.strip()
-            + f" JOIN {other_model.Meta.table_name} {other_model.Meta.table_name} ON {on}"
+            + f" {direction or ''} JOIN {other_model.Meta.table_name} {alias or other_model.Meta.table_name} ON {on}"
         )
         return SelectQuery[T](self.model, sql, self.args.copy(), self.idx)
 
