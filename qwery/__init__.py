@@ -16,7 +16,7 @@ from typing import (
     Tuple,
     Set,
 )
-from pydantic import BaseModel, ValidationError, create_model
+from pydantic import BaseModel, create_model
 from pydantic.fields import ModelField
 
 
@@ -105,10 +105,7 @@ class FetchOneQuery(Generic[T], BaseSubQuery[T]):
             )
             if not result:
                 raise ModelNotFound
-            try:
-                return self.model.parse_obj(dict(result))
-            except ValidationError as e:
-                raise ModelValidationError(str(e))
+            return self.model.construct(**dict(result))
 
         f.__name__ = "execute_fetch_one_query"
         return f
@@ -119,17 +116,14 @@ class FetchAllQuery(Generic[T], BaseSubQuery[T]):
         value: Any = {k: (v.type_, ...) for k, v in self.args.items()}
         ArgsModel = create_model("FetchAllArgsModel", **value)
 
-        async def f(conn: Connection, **kwargs) -> Iterable[T]:
+        async def f(conn: Connection, raw=False, **kwargs) -> Iterable[T]:
             parsed_kwargs = ArgsModel(**kwargs).dict()
-            try:
-                return [
-                    self.model.parse_obj(dict(i))
-                    for i in await conn.fetch(
-                        self.sql, *self.generate_sql_args(parsed_kwargs)
-                    )
-                ]
-            except ValidationError as e:
-                raise ModelValidationError(str(e))
+            return [
+                i if raw else self.model.construct(**dict(i))
+                for i in await conn.fetch(
+                    self.sql, *self.generate_sql_args(parsed_kwargs)
+                )
+            ]
 
         f.__name__ = "execute_fetch_one_query"
         return f
