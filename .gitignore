@@ -6,3 +6,4 @@
 /build
 /dist
 /scratch.txt
+.mypy_cache/

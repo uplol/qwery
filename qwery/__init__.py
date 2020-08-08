@@ -49,6 +49,48 @@ class Arg:
     splat: Optional[Callable[[Any], List[Any]]]
 
 
+class Method:
+    def __init__(self, query):
+        self._query = query
+
+    @property
+    def sql(self):
+        return self._query.sql
+
+
+class ExecuteMethod(Method):
+    async def __call__(self, conn, **kwargs):
+        sql, args = self._query.build(**kwargs)
+        await conn.execute(sql, *args)
+
+
+class PrepareMethod(Method):
+    async def __call__(self, conn, **kwargs):
+        sql, args = self._query.build(**kwargs)
+        return await conn.prepare(sql)
+
+
+class FetchOneMethod(Method):
+    async def __call__(self, conn, **kwargs):
+        sql, args = self._query.build(**kwargs)
+        result = await conn.fetchrow(sql, *args)
+        if not result:
+            raise ModelNotFound
+        return self._query.model.construct(**dict(result))
+
+
+class FetchAllMethod(Method):
+    async def __call__(self, conn, **kwargs):
+        sql, args = self._query.build(**kwargs)
+        return [
+            self._query.model.construct(**dict(i)) for i in await conn.fetch(sql, *args)
+        ]
+
+    async def tuples(self, conn, **kwargs):
+        sql, args = self._query.build(**kwargs)
+        return [tuple(i) for i in await conn.fetch(sql, *args)]
+
+
 class BaseSubQuery(Generic[T]):
     model: Type[T]
     sql: str
@@ -61,6 +103,41 @@ class BaseSubQuery(Generic[T]):
         self.args = args
         self.idx = idx
 
+        self._args_model = None
+
+    @property
+    def args_model(self):
+        if not self._args_model:
+            value: Any = {k: (v.type_, ...) for k, v in self.args.items()}
+            self._args_model = create_model("ArgsModel", **value)
+        return self._args_model
+
+    def execute(self) -> ExecuteMethod:
+        return ExecuteMethod(self)
+
+    def prepare(self) -> PrepareMethod:
+        return PrepareMethod(self)
+
+    def fetch_one(self) -> FetchOneMethod:
+        return FetchOneMethod(self)
+
+    def fetch_all(self) -> FetchAllMethod:
+        return FetchAllMethod(self)
+
+    def limit(self, amount):
+        return self.__class__(
+            self.model, self.sql + f" LIMIT {amount}", self.args.copy(), self.idx
+        )
+
+    def returning(self):
+        return self.__class__(
+            self.model, self.sql.strip() + " RETURNING *", self.args.copy(), self.idx
+        )
+
+    def build(self, **kwargs):
+        parsed_kwargs = self.args_model(**kwargs).dict()
+        return self.sql, self.generate_sql_args(parsed_kwargs)
+
     def generate_sql_args(self, kwargs: Dict[str, Any]) -> List[Any]:
         args = []
         for k, v in self.args.items():
@@ -69,90 +146,6 @@ class BaseSubQuery(Generic[T]):
             else:
                 args.append(kwargs[k])
         return args
-
-
-class PreperQuery(Generic[T], BaseSubQuery[T]):
-    def build(self) -> Callable[..., Awaitable[PreparedStatement]]:
-        async def f(conn: Connection) -> PreparedStatement:
-            return await conn.prepare(self.sql)
-
-        f.__name__ = "prepare_query"
-        return f
-
-
-class ExecuteQuery(Generic[T], BaseSubQuery[T]):
-    def build(self) -> Callable[..., Awaitable[T]]:
-        value: Any = {k: (v.type_, ...) for k, v in self.args.items()}
-        ArgsModel = create_model("ExecuteArgsModel", **value)
-
-        async def f(conn: Connection, **kwargs):
-            parsed_kwargs = ArgsModel(**kwargs).dict()
-            await conn.execute(self.sql, *self.generate_sql_args(parsed_kwargs))
-
-        f.__name__ = "execute_query"
-        return f
-
-
-class FetchOneQuery(Generic[T], BaseSubQuery[T]):
-    def build(self) -> Callable[..., Awaitable[T]]:
-        value: Any = {k: (v.type_, ...) for k, v in self.args.items()}
-        ArgsModel = create_model("FetchOneArgsModel", **value)
-
-        async def f(conn: Connection, **kwargs) -> T:
-            parsed_kwargs = ArgsModel(**kwargs).dict()
-            result = await conn.fetchrow(
-                self.sql, *self.generate_sql_args(parsed_kwargs)
-            )
-            if not result:
-                raise ModelNotFound
-            return self.model.construct(**dict(result))
-
-        f.__name__ = "execute_fetch_one_query"
-        return f
-
-
-class FetchAllQuery(Generic[T], BaseSubQuery[T]):
-    def build(self) -> Callable[..., Awaitable[Iterable[T]]]:
-        value: Any = {k: (v.type_, ...) for k, v in self.args.items()}
-        ArgsModel = create_model("FetchAllArgsModel", **value)
-
-        async def f(conn: Connection, raw=False, **kwargs) -> Iterable[T]:
-            parsed_kwargs = ArgsModel(**kwargs).dict()
-            return [
-                i if raw else self.model.construct(**dict(i))
-                for i in await conn.fetch(
-                    self.sql, *self.generate_sql_args(parsed_kwargs)
-                )
-            ]
-
-        f.__name__ = "execute_fetch_one_query"
-        return f
-
-
-class FetchValQuery(Generic[T], BaseSubQuery[T]):
-    def build(self) -> Callable[..., Awaitable[Any]]:
-        value: Any = {k: (v.type_, ...) for k, v in self.args.items()}
-        ArgsModel = create_model("FetchValArgsModel", **value)
-
-        async def f(conn: Connection, **kwargs) -> Any:
-            parsed_kwargs = ArgsModel(**kwargs).dict()
-            return await conn.fetchval(self.sql, *self.generate_sql_args(parsed_kwargs))
-
-        f.__name__ = "execute_fetch_val_query"
-        return f
-
-
-class TuplesQuery(Generic[T], BaseSubQuery[T]):
-    def build(self) -> Callable[..., Awaitable[Iterable[T]]]:
-        value: Any = {k: (v.type_, ...) for k, v in self.args.items()}
-        ArgsModel = create_model("FetchTuplesArgsModel", **value)
-
-        async def f(conn: Connection, **kwargs) -> Iterable[T]:
-            parsed_kwargs = ArgsModel(**kwargs).dict()
-            return await conn.fetch(self.sql, *self.generate_sql_args(parsed_kwargs))
-
-        f.__name__ = "execute_tuples_query"
-        return f
 
 
 def _where(
@@ -190,20 +183,6 @@ class SelectQuery(Generic[T], BaseSubQuery[T]):
     def where(self, raw_where_query) -> "SelectQuery[T]":
         return SelectQuery[T](*_where(self, raw_where_query))
 
-    def fetchone(self) -> FetchOneQuery[T]:
-        return FetchOneQuery(
-            self.model, self.sql.strip() + " LIMIT 1", self.args.copy(), self.idx
-        )
-
-    def fetchval(self) -> FetchValQuery[T]:
-        return FetchValQuery(self.model, self.sql, self.args.copy(), self.idx)
-
-    def fetchall(self) -> FetchAllQuery[T]:
-        return FetchAllQuery(self.model, self.sql, self.args.copy(), self.idx)
-
-    def tuples(self) -> TuplesQuery[T]:
-        return TuplesQuery(self.model, self.sql, self.args.copy(), self.idx)
-
     def group_by(self, by) -> "SelectQuery[T]":
         return SelectQuery[T](
             self.model, self.sql.strip() + f" GROUP BY {by}", self.args.copy(), self.idx
@@ -216,9 +195,6 @@ class SelectQuery(Generic[T], BaseSubQuery[T]):
             self.args.copy(),
             self.idx,
         )
-
-    def preper(self) -> PreperQuery[T]:
-        return PreperQuery(self.model, self.sql, self.args.copy(), self.idx)
 
     def raw(self, raw) -> "SelectQuery[T]":
         return SelectQuery[T](
@@ -237,9 +213,6 @@ class DeleteQuery(Generic[T], BaseSubQuery[T]):
     def where(self, raw_where_query: str) -> "DeleteQuery[T]":
         return DeleteQuery(*_where(self, raw_where_query))
 
-    def build(self) -> Callable[..., Awaitable[T]]:
-        return ExecuteQuery[T](self.model, self.sql, self.args, self.idx).build()
-
 
 class UpdateQuery(Generic[T], BaseSubQuery[T]):
     def where(self, raw_where_query: str) -> "UpdateQuery[T]":
@@ -249,15 +222,6 @@ class UpdateQuery(Generic[T], BaseSubQuery[T]):
         return UpdateQuery[T](
             self.model, self.sql.strip() + " RETURNING *", self.args.copy(), self.idx
         )
-
-    def fetchone(self) -> FetchOneQuery[T]:
-        return FetchOneQuery(self.model, self.sql, self.args.copy(), self.idx)
-
-    def fetchall(self) -> FetchAllQuery[T]:
-        return FetchAllQuery(self.model, self.sql, self.args.copy(), self.idx)
-
-    def build(self) -> Callable[..., Awaitable[T]]:
-        return ExecuteQuery[T](self.model, self.sql, self.args, self.idx).build()
 
 
 class InsertQuery(Generic[T], BaseSubQuery[T]):
@@ -269,19 +233,24 @@ class InsertQuery(Generic[T], BaseSubQuery[T]):
             self.idx,
         )
 
-    def fetchone(self) -> FetchOneQuery[T]:
-        return FetchOneQuery(self.model, self.sql, self.args.copy(), self.idx)
-
-    def fetchall(self) -> FetchAllQuery[T]:
-        return FetchAllQuery(self.model, self.sql, self.args.copy(), self.idx)
-
     def returning(self) -> "InsertQuery[T]":
         return InsertQuery[T](
             self.model, self.sql.strip() + " RETURNING *", self.args.copy(), self.idx
         )
 
-    def build(self) -> Callable[..., Awaitable[T]]:
-        return ExecuteQuery[T](self.model, self.sql, self.args, self.idx).build()
+
+class DynamicUpdateQuery(Generic[T], BaseSubQuery[T]):
+    def where(self, raw_where_query: str) -> "DynamicUpdateQuery[T]":
+        return DynamicUpdateQuery(*_where(self, raw_where_query))
+
+    def build(self, **kwargs):
+        parsed_kwargs = self.args_model(
+            **{k: kwargs.pop(k) for k in self.args_model.__fields__}
+        ).dict()
+        parts = [f"{k} = ${self.idx + i + 1}" for i, k in enumerate(kwargs.keys())]
+        sql = self.sql.format(dynamic=", ".join(parts))
+        args = self.generate_sql_args(parsed_kwargs) + list(kwargs.values())
+        return sql, args
 
 
 class Query(Generic[T]):
@@ -294,6 +263,11 @@ class Query(Generic[T]):
 
     def delete(self) -> DeleteQuery[T]:
         return DeleteQuery[T](self.model, f"DELETE FROM {self._table_name}", {}, 0)
+
+    def dynamic_update(self) -> DynamicUpdateQuery[T]:
+        return DynamicUpdateQuery[T](
+            self.model, f"UPDATE {self._table_name} SET {{dynamic}} ", {}, 0
+        )
 
     def update(self, *fields, **kwargs) -> UpdateQuery[T]:
         args = {}
@@ -314,7 +288,7 @@ class Query(Generic[T]):
 
     def insert(
         self, body: bool = False, ignore: Optional[Set[str]] = None
-    ) -> ExecuteQuery[T]:
+    ) -> InsertQuery[T]:
         if body:
             assert ignore is None, "cannot use ignore with body = True"
 

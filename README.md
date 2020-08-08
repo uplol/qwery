@@ -38,10 +38,10 @@ class MyModel(BaseModel):
 
 
 class MyModelQueries:
-    create = Query(MyModel).insert(body=True).build()
-    delete_by_id = Query(MyModel).delete().where("id = {.id}").build()
-    get_by_id = Query(MyModel).select().where("id = {.id}").fetchone().build()
-    get_all = Query(MyModel).select().fetchall().build()
+    create = Query(MyModel).insert(body=True).execute()
+    delete_by_id = Query(MyModel).delete().where("id = {.id}").execute()
+    get_by_id = Query(MyModel).select().where("id = {.id}").fetch_one()
+    get_all = Query(MyModel).select().fetch_all()
 
 
 async with pool.acquire() as conn:
