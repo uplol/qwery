@@ -11,7 +11,7 @@ setup(
     long_description=long_description,
     long_description_content_type="text/markdown",
     packages=find_packages(),
-    install_requires=["asyncpg==0.20.1", "pydantic==1.5.1"],
+    install_requires=["asyncpg==0.21.0", "pydantic==1.7.2"],
     setup_requires=["pytest-runner"],
     tests_require=["pytest==5.4.1", "pytest-asyncio"],
     classifiers=[
