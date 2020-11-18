@@ -5,7 +5,7 @@ with open("README.md", "r") as fh:
 
 setup(
     name="qwery",
-    version="0.0.7",
+    version="0.0.8",
     url="https://github.com/uplol/qwery",
     description="small and lightweight query builder and data layer based on Pydantic and asyncpg",
     long_description=long_description,
