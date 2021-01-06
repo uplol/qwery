@@ -1,23 +1,24 @@
+import json
 import string
-from asyncpg import Connection
-from asyncpg.prepared_stmt import PreparedStatement
+import typing
 from dataclasses import dataclass
 from typing import (
-    TypeVar,
-    Type,
-    Callable,
-    Iterable,
     Any,
-    Generic,
+    Callable,
     Dict,
-    Awaitable,
+    Generic,
     List,
     Optional,
-    Tuple,
     Set,
+    Tuple,
+    Type,
+    TypeVar,
+    Union,
 )
+
 from pydantic import BaseModel, create_model
 from pydantic.fields import ModelField
+from pydantic.json import pydantic_encoder
 
 
 class ModelNotFound(Exception):
@@ -32,8 +33,43 @@ class Model(BaseModel):
     pass
 
 
+JSONContainerType = TypeVar("JSONContainerType")
+
+
+class JSONB(Generic[JSONContainerType]):
+    @classmethod
+    def __get_validators__(cls):
+        yield cls.validate
+
+    @classmethod
+    def validate(cls, v, field: ModelField):
+        if isinstance(v, (str, bytes)):
+            v = json.loads(v)
+        return field.sub_fields[0].validate(v, {}, loc=field.name)[0]
+
+
 QueryT = TypeVar("QueryT")
 T = TypeVar("T", bound=Model)
+
+
+def _prepare_sql_args(data, fields):
+    args = []
+    for k, v in fields.items():
+        origin = typing.get_origin(v.type_)
+        if v.splat:
+            args.extend(v.splat(data[k]))
+        elif (
+            origin is JSONB
+            or origin is Union
+            and any(typing.get_origin(i) == JSONB for i in typing.get_args(v.type_))
+        ):
+            if data[k] is None:
+                args.append(None)
+            else:
+                args.append(json.dumps(data[k], default=pydantic_encoder))
+        else:
+            args.append(data[k])
+    return args
 
 
 def _get_field_type(field: ModelField):
@@ -76,15 +112,13 @@ class FetchOneMethod(Method):
         result = await conn.fetchrow(sql, *args)
         if not result:
             raise ModelNotFound
-        return self._query.model.construct(**dict(result))
+        return self._query.model(**dict(result))
 
 
 class FetchAllMethod(Method):
     async def __call__(self, conn, **kwargs):
         sql, args = self._query.build(**kwargs)
-        return [
-            self._query.model.construct(**dict(i)) for i in await conn.fetch(sql, *args)
-        ]
+        return [self._query.model(**dict(i)) for i in await conn.fetch(sql, *args)]
 
     async def tuples(self, conn, **kwargs):
         sql, args = self._query.build(**kwargs)
@@ -139,13 +173,7 @@ class BaseSubQuery(Generic[T]):
         return self.sql, self.generate_sql_args(parsed_kwargs)
 
     def generate_sql_args(self, kwargs: Dict[str, Any]) -> List[Any]:
-        args = []
-        for k, v in self.args.items():
-            if v.splat:
-                args.extend(v.splat(kwargs[k]))
-            else:
-                args.append(kwargs[k])
-        return args
+        return _prepare_sql_args(kwargs, self.args)
 
 
 def _where(
@@ -249,7 +277,18 @@ class DynamicUpdateQuery(Generic[T], BaseSubQuery[T]):
         ).dict()
         parts = [f"{k} = ${self.idx + i + 1}" for i, k in enumerate(kwargs.keys())]
         sql = self.sql.format(dynamic=", ".join(parts))
-        args = self.generate_sql_args(parsed_kwargs) + list(kwargs.values())
+
+        kwarg_args = {
+            k: Arg(self.model.__fields__[k].type_, None) for k in kwargs.keys()
+        }
+
+        for k, v in kwargs.items():
+            if isinstance(v, BaseModel) and self.model.__fields__[k].type_ == JSONB:
+                kwargs[k] = v.json()
+
+        args = self.generate_sql_args(parsed_kwargs) + _prepare_sql_args(
+            kwargs, kwarg_args
+        )
         return sql, args
 
 
