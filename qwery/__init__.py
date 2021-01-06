@@ -1,16 +1,15 @@
+import typing
 import string
-from asyncpg import Connection
-from asyncpg.prepared_stmt import PreparedStatement
+import json
 from dataclasses import dataclass
 from typing import (
+    Union,
     TypeVar,
     Type,
     Callable,
-    Iterable,
     Any,
     Generic,
     Dict,
-    Awaitable,
     List,
     Optional,
     Tuple,
@@ -18,6 +17,7 @@ from typing import (
 )
 from pydantic import BaseModel, create_model
 from pydantic.fields import ModelField
+from pydantic.json import pydantic_encoder
 
 
 class ModelNotFound(Exception):
@@ -30,6 +30,25 @@ class ModelValidationError(Exception):
 
 class Model(BaseModel):
     pass
+
+
+JSONContainerType = TypeVar("JSONContainerType")
+
+
+class JSONB(Generic[JSONContainerType]):
+    @classmethod
+    def __get_validators__(cls):
+        yield cls.validate
+
+    @classmethod
+    def validate(cls, v, field: ModelField):
+        if isinstance(v, (str, bytes)):
+            res = field.sub_fields[0].type_.parse_raw(v)
+            return res
+        elif isinstance(v, field.sub_fields[0].type_):
+            return v
+        else:
+            raise Exception("unsupported type")
 
 
 QueryT = TypeVar("QueryT")
@@ -141,8 +160,18 @@ class BaseSubQuery(Generic[T]):
     def generate_sql_args(self, kwargs: Dict[str, Any]) -> List[Any]:
         args = []
         for k, v in self.args.items():
+            origin = typing.get_origin(v.type_)
             if v.splat:
                 args.extend(v.splat(kwargs[k]))
+            elif (
+                origin is JSONB
+                or origin is Union
+                and any(typing.get_origin(i) == JSONB for i in typing.get_args(v.type_))
+            ):
+                if kwargs[k] is None:
+                    args.append(None)
+                else:
+                    args.append(json.dumps(kwargs[k], default=pydantic_encoder))
             else:
                 args.append(kwargs[k])
         return args

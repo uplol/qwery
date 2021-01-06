@@ -1,7 +1,8 @@
+from dataclasses import dataclass
 import pytest
-from pydantic import ValidationError
+from pydantic import ValidationError, Json, BaseModel
 from typing import Optional
-from qwery import Model, Query
+from qwery import Model, Query, JSONB
 
 
 class ExampleModel(Model):
@@ -98,7 +99,23 @@ async def test_validate_insert_query():
     ]
 
 
-# @pytest.mark.asyncio
-# async def test_validate_dynamic_update_query():
-#     test_model_query = Query(ExampleModel).dynamic_update().where("a = {.a}").execute()
-#     await test_model_query(None, a=1, b=None)
+class ExampleEmbeddedData(BaseModel):
+    a: int
+    b: str
+    c: bool
+
+
+class ExampleJSONModel(Model):
+    class Meta:
+        table_name = "test"
+
+    data: Optional[JSONB[ExampleEmbeddedData]]
+
+
+@pytest.mark.asyncio
+async def test_embedded_json():
+    example = ExampleEmbeddedData(a=1, b="test", c=True)
+    insert = Query(ExampleJSONModel).insert().execute()
+    _, args = insert._query.build(data=example)
+    assert args[0] == example.json()
+    ExampleJSONModel(dataclass=example.json())
