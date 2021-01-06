@@ -115,14 +115,14 @@ class FetchOneMethod(Method):
         result = await conn.fetchrow(sql, *args)
         if not result:
             raise ModelNotFound
-        return self._query.model.parse_obj(**dict(result))
+        return self._query.model(**dict(result))
 
 
 class FetchAllMethod(Method):
     async def __call__(self, conn, **kwargs):
         sql, args = self._query.build(**kwargs)
         return [
-            self._query.model.parse_obj(**dict(i)) for i in await conn.fetch(sql, *args)
+            self._query.model(**dict(i)) for i in await conn.fetch(sql, *args)
         ]
 
     async def tuples(self, conn, **kwargs):
