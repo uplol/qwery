@@ -55,6 +55,26 @@ QueryT = TypeVar("QueryT")
 T = TypeVar("T", bound=Model)
 
 
+def _prepare_sql_args(data, fields):
+    args = []
+    for k, v in fields.items():
+        origin = typing.get_origin(v.type_)
+        if v.splat:
+            args.extend(v.splat(data[k]))
+        elif (
+            origin is JSONB
+            or origin is Union
+            and any(typing.get_origin(i) == JSONB for i in typing.get_args(v.type_))
+        ):
+            if data[k] is None:
+                args.append(None)
+            else:
+                args.append(json.dumps(data[k], default=pydantic_encoder))
+        else:
+            args.append(data[k])
+    return args
+
+
 def _get_field_type(field: ModelField):
     type_ = field.outer_type_
     if not field.required:
@@ -158,23 +178,7 @@ class BaseSubQuery(Generic[T]):
         return self.sql, self.generate_sql_args(parsed_kwargs)
 
     def generate_sql_args(self, kwargs: Dict[str, Any]) -> List[Any]:
-        args = []
-        for k, v in self.args.items():
-            origin = typing.get_origin(v.type_)
-            if v.splat:
-                args.extend(v.splat(kwargs[k]))
-            elif (
-                origin is JSONB
-                or origin is Union
-                and any(typing.get_origin(i) == JSONB for i in typing.get_args(v.type_))
-            ):
-                if kwargs[k] is None:
-                    args.append(None)
-                else:
-                    args.append(json.dumps(kwargs[k], default=pydantic_encoder))
-            else:
-                args.append(kwargs[k])
-        return args
+        return _prepare_sql_args(kwargs, self.args)
 
 
 def _where(
@@ -278,7 +282,18 @@ class DynamicUpdateQuery(Generic[T], BaseSubQuery[T]):
         ).dict()
         parts = [f"{k} = ${self.idx + i + 1}" for i, k in enumerate(kwargs.keys())]
         sql = self.sql.format(dynamic=", ".join(parts))
-        args = self.generate_sql_args(parsed_kwargs) + list(kwargs.values())
+
+        kwarg_args = {
+            k: Arg(self.model.__fields__[k].type_, None) for k in kwargs.keys()
+        }
+
+        for k, v in kwargs.items():
+            if isinstance(v, BaseModel) and self.model.__fields__[k].type_ == JSONB:
+                kwargs[k] = v.json()
+
+        args = self.generate_sql_args(parsed_kwargs) + _prepare_sql_args(
+            kwargs, kwarg_args
+        )
         return sql, args
 
 

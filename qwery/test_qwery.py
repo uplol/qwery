@@ -119,3 +119,7 @@ async def test_embedded_json():
     _, args = insert._query.build(data=example)
     assert args[0] == example.json()
     ExampleJSONModel(dataclass=example.json())
+
+    update = Query(ExampleJSONModel).dynamic_update().execute()
+    _, args = update._query.build(data=example)
+    assert args[0] == example.json()
