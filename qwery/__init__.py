@@ -1,20 +1,21 @@
-import typing
-import string
 import json
+import string
+import typing
 from dataclasses import dataclass
 from typing import (
-    Union,
-    TypeVar,
-    Type,
-    Callable,
     Any,
-    Generic,
+    Callable,
     Dict,
+    Generic,
     List,
     Optional,
-    Tuple,
     Set,
+    Tuple,
+    Type,
+    TypeVar,
+    Union,
 )
+
 from pydantic import BaseModel, create_model
 from pydantic.fields import ModelField
 from pydantic.json import pydantic_encoder
@@ -45,7 +46,7 @@ class JSONB(Generic[JSONContainerType]):
         if isinstance(v, (str, bytes)):
             res = field.sub_fields[0].type_.parse_raw(v)
             return res
-        elif isinstance(v, field.sub_fields[0].type_):
+        elif isinstance(v, typing.get_origin(field.sub_fields[0].type_)):
             return v
         else:
             raise Exception("unsupported type")

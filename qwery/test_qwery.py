@@ -115,11 +115,15 @@ class ExampleJSONModel(Model):
 @pytest.mark.asyncio
 async def test_embedded_json():
     example = ExampleEmbeddedData(a=1, b="test", c=True)
+
     insert = Query(ExampleJSONModel).insert().execute()
     _, args = insert._query.build(data=example)
     assert args[0] == example.json()
-    ExampleJSONModel(dataclass=example.json())
 
     update = Query(ExampleJSONModel).dynamic_update().execute()
     _, args = update._query.build(data=example)
     assert args[0] == example.json()
+
+    assert ExampleJSONModel(data=example).dict() == {
+        "data": {"a": 1, "b": "test", "c": True}
+    }
