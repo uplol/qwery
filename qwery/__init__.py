@@ -44,12 +44,8 @@ class JSONB(Generic[JSONContainerType]):
     @classmethod
     def validate(cls, v, field: ModelField):
         if isinstance(v, (str, bytes)):
-            res = field.sub_fields[0].type_.parse_raw(v)
-            return res
-        elif isinstance(v, typing.get_origin(field.sub_fields[0].type_)):
-            return v
-        else:
-            raise Exception("unsupported type")
+            v = json.loads(v)
+        return field.sub_fields[0].validate(v, {}, loc=field.name)[0]
 
 
 QueryT = TypeVar("QueryT")
@@ -122,9 +118,7 @@ class FetchOneMethod(Method):
 class FetchAllMethod(Method):
     async def __call__(self, conn, **kwargs):
         sql, args = self._query.build(**kwargs)
-        return [
-            self._query.model(**dict(i)) for i in await conn.fetch(sql, *args)
-        ]
+        return [self._query.model(**dict(i)) for i in await conn.fetch(sql, *args)]
 
     async def tuples(self, conn, **kwargs):
         sql, args = self._query.build(**kwargs)
