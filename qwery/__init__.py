@@ -93,6 +93,12 @@ class Method:
     def sql(self):
         return self._query.sql
 
+    def order_by(self, *args, **kwargs) -> "Method":
+        return self.__class__(self._query.order_by(*args, **kwargs))
+
+    def limit(self, *args, **kwargs) -> "Method":
+        return self.__class__(self._query.limit(*args, **kwargs))
+
 
 class ExecuteMethod(Method):
     async def __call__(self, conn, **kwargs):
