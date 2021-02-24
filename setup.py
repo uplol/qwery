@@ -11,9 +11,9 @@ setup(
     long_description=long_description,
     long_description_content_type="text/markdown",
     packages=find_packages(),
-    install_requires=["pydantic>=1.7.*"],
+    install_requires=["pydantic>=1.7.3"],
     setup_requires=["pytest-runner"],
-    tests_require=["pytest>=5.4.*", "pytest-asyncio"],
+    tests_require=["pytest>=6.2.2", "pytest-asyncio"],
     classifiers=[
         "Programming Language :: Python :: 3",
         "License :: OSI Approved :: MIT License",
