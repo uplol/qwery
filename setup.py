@@ -5,13 +5,13 @@ with open("README.md", "r") as fh:
 
 setup(
     name="qwery",
-    version="0.0.9",
+    version="0.0.10",
     url="https://github.com/uplol/qwery",
     description="small and lightweight query builder and data layer based on Pydantic and asyncpg",
     long_description=long_description,
     long_description_content_type="text/markdown",
     packages=find_packages(),
-    install_requires=["pydantic>=1.7.3"],
+    install_requires=["pydantic>=1.8"],
     setup_requires=["pytest-runner"],
     tests_require=["pytest>=6.2.2", "pytest-asyncio"],
     classifiers=[
