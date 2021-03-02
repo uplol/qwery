@@ -96,6 +96,9 @@ class Method:
     def order_by(self, *args, **kwargs) -> "Method":
         return self.__class__(self._query.order_by(*args, **kwargs))
 
+    def offset(self, *args, **kwargs) -> "Method":
+        return self.__class__(self._query.offset(*args, **kwargs))
+
     def limit(self, *args, **kwargs) -> "Method":
         return self.__class__(self._query.limit(*args, **kwargs))
 
@@ -163,6 +166,11 @@ class BaseSubQuery(Generic[T]):
 
     def fetch_all(self) -> FetchAllMethod:
         return FetchAllMethod(self)
+
+    def offset(self, amount):
+        return self.__class__(
+            self.model, self.sql + f" OFFSET {amount}", self.args.copy(), self.idx
+        )
 
     def limit(self, amount):
         return self.__class__(
