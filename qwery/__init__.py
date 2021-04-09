@@ -1,7 +1,8 @@
+import dataclasses
 import json
 import string
 import typing
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import (
     Any,
     Callable,
@@ -132,6 +133,82 @@ class FetchAllMethod(Method):
     async def tuples(self, conn, **kwargs):
         sql, args = self._query.build(**kwargs)
         return [tuple(i) for i in await conn.fetch(sql, *args)]
+
+
+@dataclass(frozen=True)
+class QueryBuilder:
+    @dataclass(frozen=True)
+    class QueryArgument:
+        # The argument name which will be used to fetch an argument value from the
+        #  called kwargs.
+        name: str
+
+    # The model this query is for
+    model: Any
+    sql: str
+    args: List[QueryArgument] = field(default_factory=list)
+
+    def _with_sql(self, contents) -> "QueryBuilder":
+        return dataclasses.replace(self, sql=self.sql + " " + contents)
+
+    def _with_arg(self, name: str) -> Tuple[str, "QueryBuilder"]:
+        for index, arg in enumerate(self.args):
+            if arg.name == name:
+                return f"${index + 1}", self
+
+        return (
+            f"${len(self.args) + 1}",
+            dataclasses.replace(
+                self, args=self.args + [QueryBuilder.QueryArgument(name=name)],
+            ),
+        )
+
+    def _parse_arguments(self, contents: str) -> Tuple[str, "QueryBuilder"]:
+        format_parts = list(string.Formatter().parse(contents))
+
+        # No actual format parts where in the string, so we don't need to do anything
+        if len(format_parts) == 1 and not format_parts[0][1]:
+            return format_parts[0][0], self
+
+        output_contents = ""
+        for (unrelated_text, field_contents, _, _) in format_parts:
+            output_contents += unrelated_text
+
+            if not field_contents:
+                continue
+
+            # Hard error on fields from an old and now unsupported feature
+            if field_contents.startswith("."):
+                raise ValueError("field cannot start with a period")
+
+            arg_ref, self = self._with_arg(field_contents)
+            output_contents += arg_ref
+
+        return output_contents, self
+
+    def execute(self) -> ExecuteMethod:
+        return ExecuteMethod(self)
+
+    def prepare(self) -> PrepareMethod:
+        return PrepareMethod(self)
+
+    def fetch_one(self) -> FetchOneMethod:
+        return FetchOneMethod(self)
+
+    def fetch_all(self) -> FetchAllMethod:
+        return FetchAllMethod(self)
+
+    def offset(self, amount: Union[int, str]) -> "QueryBuilder":
+        if isinstance(amount, str):
+            amount, self = self._parse_arguments(amount)
+
+        return self._with_sql(f"OFFSET {amount}")
+
+    def limit(self, amount: Union[int, str]) -> "QueryBuilder":
+        if isinstance(amount, str):
+            amount, self = self._parse_arguments(amount)
+
+        return self._with_sql(f"LIMIT {amount}")
 
 
 class BaseSubQuery(Generic[T]):
@@ -339,33 +416,14 @@ class Query(Generic[T]):
             self.model, f"UPDATE {self._table_name} SET {', '.join(updates)}", args, idx
         )
 
-    def insert(
-        self, body: bool = False, ignore: Optional[Set[str]] = None
-    ) -> InsertQuery[T]:
-        if body:
-            assert ignore is None, "cannot use ignore with body = True"
+    def insert(self, ignore: Optional[Set[str]] = None) -> InsertQuery[T]:
+        fields = [
+            k for k in self.model.__fields__.keys() if not ignore or k not in ignore
+        ]
 
-            def f(inst: Dict[str, Any]):
-                return inst.values()
-
-            camel = ""
-            for char in self.model.__name__:
-                if camel and char.isupper():
-                    camel += "_" + char.lower()
-                else:
-                    camel += char.lower()
-
-            f.__name__ = f"{camel}_splat"
-            fields = list(self.model.__fields__.keys())
-            args = {camel: Arg(self.model, f)}
-        else:
-            fields = [
-                k for k in self.model.__fields__.keys() if not ignore or k not in ignore
-            ]
-
-            args = {}
-            for field in fields:
-                args[field] = Arg(_get_field_type(self.model.__fields__[field]), None)
+        args = {}
+        for field in fields:
+            args[field] = Arg(_get_field_type(self.model.__fields__[field]), None)
 
         values = ", ".join(f"${idx + 1}" for idx in range(len(fields)))
         sql = f"INSERT INTO {self._table_name} ({', '.join(fields)}) VALUES ({values})"

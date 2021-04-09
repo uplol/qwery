@@ -1,8 +1,10 @@
 from dataclasses import dataclass
-import pytest
-from pydantic import ValidationError, Json, BaseModel
 from typing import Optional
-from qwery import Model, Query, JSONB
+
+import pytest
+from pydantic import BaseModel, Json, ValidationError
+
+from qwery import JSONB, Model, Query, QueryBuilder
 
 
 class ExampleModel(Model):
@@ -86,18 +88,6 @@ async def test_validate_insert_query():
         }
     ]
 
-    test_model_query = Query(ExampleModel).insert(body=True).execute()
-    with pytest.raises(ValidationError) as excinfo:
-        await test_model_query(None, a=1, c=1)
-
-    assert excinfo.value.errors() == [
-        {
-            "loc": ("example_model",),
-            "msg": "field required",
-            "type": "value_error.missing",
-        }
-    ]
-
 
 class ExampleEmbeddedData(BaseModel):
     a: int
@@ -127,3 +117,24 @@ async def test_embedded_json():
     assert ExampleJSONModel(data=example).dict() == {
         "data": {"a": 1, "b": "test", "c": True}
     }
+
+
+@pytest.fixture(scope="session")
+def select_builder() -> QueryBuilder:
+    return QueryBuilder(model=ExampleModel, sql="SELECT * FROM test")
+
+
+def test_query_builder_offset(select_builder):
+    assert select_builder.offset(1).sql == "SELECT * FROM test OFFSET 1"
+    assert select_builder.offset("{offset}").sql == "SELECT * FROM test OFFSET $1"
+    assert select_builder.offset("{offset}").args == [
+        QueryBuilder.QueryArgument(name="offset")
+    ]
+    assert (
+        select_builder.offset("get_offset()").sql
+        == "SELECT * FROM test OFFSET get_offset()"
+    )
+    assert (
+        select_builder.offset("get_offset({k}, {v})").sql
+        == "SELECT * FROM test OFFSET get_offset($1, $2)"
+    )
