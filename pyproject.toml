@@ -1,0 +1,23 @@
+[tool.poetry]
+name = "qwery"
+version = "0.1.0"
+description = "small async query builder for postgres"
+authors = ["andrei <b1naryth1ef@gmail.com>"]
+license = "MIT"
+
+[tool.poetry.dependencies]
+python = "^3.8"
+pydantic = "^1.8.1"
+
+[tool.poetry.dev-dependencies]
+pytest = "^6.2.3"
+pytest-runner = "^5.3.0"
+pytest-asyncio = "^0.14.0"
+asyncpg = "^0.22.0"
+flake8 = "^3.9.0"
+black = "^20.8b1"
+mypy = "^0.812"
+
+[build-system]
+requires = ["poetry-core>=1.0.0"]
+build-backend = "poetry.core.masonry.api"
