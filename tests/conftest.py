@@ -14,8 +14,8 @@ TESTING_TABLES = {
     "simple": """
         CREATE TABLE simple (a BIGINT, b TEXT, c BOOL);
     """,
-    "complex": """
-        CREATE TABLE complex (a JSONB);
+    "test_jsonb": """
+        CREATE TABLE test_jsonb (a JSONB);
     """,
 }
 

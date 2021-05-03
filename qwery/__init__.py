@@ -68,7 +68,16 @@ class Method:
 
     def _process_arguments(self, *, arguments: Dict[str, Any]) -> List[Any]:
         inst = self._argument_model(**arguments)
-        return [getattr(inst, k) for k in inst.__fields__.keys()]
+        result = []
+        for key, field_obj in inst.__fields__.items():
+            value = getattr(inst, key)
+            if "jsonb" in field_obj.field_info.extra:
+                if isinstance(value, dict):
+                    value = json.dumps(value)
+                else:
+                    value = value.json()
+            result.append(value)
+        return result
 
     @property
     def sql(self):
@@ -83,14 +92,14 @@ class ExecuteMethod(Method):
 
 class PrepareMethod(Method):
     async def __call__(self, conn, **kwargs):
-        sql, _ = self._query.build(**kwargs)
-        return await conn.prepare(sql)
+        args = self._process_arguments(arguments=kwargs)
+        return await conn.prepare(self.sql, *args)
 
 
 class FetchOneMethod(Method):
     async def __call__(self, conn, **kwargs):
-        sql, args = self._query.build(**kwargs)
-        result = await conn.fetchrow(sql, *args)
+        args = self._process_arguments(arguments=kwargs)
+        result = await conn.fetchrow(self.sql, *args)
         if not result:
             raise ModelNotFound
         return self._query.model(**dict(result))
@@ -98,12 +107,20 @@ class FetchOneMethod(Method):
 
 class FetchAllMethod(Method):
     async def __call__(self, conn, **kwargs):
-        sql, args = self._query.build(**kwargs)
-        return [self._query.model(**dict(i)) for i in await conn.fetch(sql, *args)]
+        return [self._query.model(**dict(i)) async for i in self.rows(conn, **kwargs)]
 
     async def tuples(self, conn, **kwargs):
-        sql, args = self._query.build(**kwargs)
-        return [tuple(i) for i in await conn.fetch(sql, *args)]
+        return [tuple(i) async for i in self.rows(conn, **kwargs)]
+
+    async def rows(self, conn, **kwargs):
+        args = self._process_arguments(arguments=kwargs)
+        for i in await conn.fetch(self.sql, *args):
+            yield i
+
+    async def cursor(self, conn, **kwargs):
+        args = self._process_arguments(arguments=kwargs)
+        async for i in conn.cursor(self.sql, *args):
+            yield self._query.model(**dict(i))
 
 
 QueryBuilderT = TypeVar("QueryBuilderT", bound="QueryBuilder")
@@ -142,17 +159,20 @@ class QueryBuilder:
         return dataclasses.replace(self, sql=self.sql + contents)
 
     def _with_arg(
-        self: QueryBuilderT, name: str, type: object = Any
+        self: QueryBuilderT, name: str, type_of: object = Any
     ) -> Tuple[str, QueryBuilderT]:
         for index, arg in enumerate(self.args):
             if arg.name == name:
                 return f"${index + 1}", self
 
+        if typing.get_origin(type_of) == JSONB:
+            pass
+
         return (
             f"${len(self.args) + 1}",
             dataclasses.replace(
                 self,
-                args=self.args + [QueryBuilder.QueryArgument(name=name, type=type)],
+                args=self.args + [QueryBuilder.QueryArgument(name=name, type=type_of)],
             ),
         )
 
@@ -186,7 +206,7 @@ class QueryBuilder:
             if typehint:
                 type = SUPPORTED_ARGUMENT_TYPE_HINTS[typehint.strip()]
 
-            arg_ref, self = self._with_arg(field_contents, type=type)
+            arg_ref, self = self._with_arg(field_contents, type_of=type)
             output_contents += arg_ref
 
         return output_contents, self
@@ -228,10 +248,15 @@ class QueryBuilder:
         return ExecuteMethod(self)
 
     def build_argument_model(self):
-        return create_model(
+        model = create_model(
             f"{self.model.__name__}QueryArgs",
             **{arg.name: (arg.type, ...) for arg in self.args},
         )
+
+        for arg in self.args:
+            if typing.get_origin(arg.type) == JSONB:
+                model.__fields__[arg.name].field_info.extra["jsonb"] = True
+        return model
 
 
 class Query:
@@ -270,7 +295,9 @@ class Query:
 
         set_statements = []
         for arg in args:
-            arg_ref, builder = builder._with_arg(arg)
+            arg_ref, builder = builder._with_arg(
+                arg, typing.get_type_hints(self.model)[arg]
+            )
             set_statements.append(f"{arg} = {arg_ref}")
 
         for key, value in kwargs.items():
