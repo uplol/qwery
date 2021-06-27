@@ -60,6 +60,19 @@ class Arg:
     splat: Optional[Callable[[Any], List[Any]]]
 
 
+def _process_argument_model_instance(inst) -> List[Any]:
+    result = []
+    for key, field_obj in inst.__fields__.items():
+        value = getattr(inst, key)
+        if "jsonb" in field_obj.field_info.extra:
+            if isinstance(value, dict):
+                value = json.dumps(value)
+            else:
+                value = value.json()
+        result.append(value)
+    return result
+
+
 class Method:
     def __init__(self, query):
         self._query = query
@@ -67,17 +80,7 @@ class Method:
         self._argument_model = argument_model
 
     def _process_arguments(self, *, arguments: Dict[str, Any]) -> List[Any]:
-        inst = self._argument_model(**arguments)
-        result = []
-        for key, field_obj in inst.__fields__.items():
-            value = getattr(inst, key)
-            if "jsonb" in field_obj.field_info.extra:
-                if isinstance(value, dict):
-                    value = json.dumps(value)
-                else:
-                    value = value.json()
-            result.append(value)
-        return result
+        return _process_argument_model_instance(self._argument_model(**arguments))
 
 
 class ExecuteMethod(Method):
@@ -438,10 +441,11 @@ class DynamicUpdateQueryBuilder(QueryBuilder):
             arg_id += 1
 
         inst = model(**unused)
+        args = _process_argument_model_instance(inst)
 
         return (
             f"UPDATE {self.model.Meta.table_name} SET {', '.join(set_statements)} {self.sql}",
-            [getattr(inst, k) for k in unused.keys()],
+            args,
         )
 
 
