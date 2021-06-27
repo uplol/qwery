@@ -24,6 +24,7 @@ class JSONBPostgresModel(Model):
         table_name = "test_jsonb"
 
     a: JSONB[Optional[EmbeddedData]]
+    b: Optional[JSONB[EmbeddedData]]
 
 
 async def test_postgres_conn(conn):
@@ -57,8 +58,16 @@ async def test_postgres_dynamic_update(conn):
 async def test_postgres_jsonb(conn):
     fn = Query(JSONBPostgresModel).insert().returning().fetch_one()
     test_obj = {"a": 1, "b": "b", "c": True}
-    obj = await fn(conn, a=test_obj)
+    obj = await fn(conn, a=test_obj, b={"yes": "works"})
     assert obj.a == test_obj
+    assert obj.b["yes"] == "works"
+
+    obj2 = await fn(conn, a=test_obj, b=None)
+    assert obj2.b is None
+
+    obj3 = await fn(conn, a=JSONB.null, b=None)
+    assert obj3.a is None
+    assert obj3.b is None
 
     fn = Query(JSONBPostgresModel).select().fetch_all()
     data = await fn(conn)

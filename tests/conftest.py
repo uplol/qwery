@@ -15,7 +15,7 @@ TESTING_TABLES = {
         CREATE TABLE simple (a BIGINT, b TEXT, c BOOL);
     """,
     "test_jsonb": """
-        CREATE TABLE test_jsonb (a JSONB);
+        CREATE TABLE test_jsonb (a JSONB NOT NULL, b JSONB);
     """,
 }
 

@@ -42,6 +42,8 @@ JSONContainerType = TypeVar("JSONContainerType")
 
 
 class JSONB(Generic[JSONContainerType]):
+    null = object()
+
     @classmethod
     def __get_validators__(cls):
         yield cls.validate
@@ -65,7 +67,12 @@ def _process_argument_model_instance(inst) -> List[Any]:
     for key, field_obj in inst.__fields__.items():
         value = getattr(inst, key)
         if "jsonb" in field_obj.field_info.extra:
-            if isinstance(value, dict):
+            # TODO: null safety here?
+            if value is JSONB.null:
+                value = json.dumps(None)
+            elif value is None:
+                value = value
+            elif isinstance(value, dict):
                 value = json.dumps(value)
             else:
                 value = value.json()
@@ -261,9 +268,19 @@ class QueryBuilder:
         )
 
         for arg in self.args:
-            if typing.get_origin(arg.type) == JSONB:
+            if _is_jsonb_type(arg.type):
                 model.__fields__[arg.name].field_info.extra["jsonb"] = True
         return model
+
+
+def _is_jsonb_type(type_: Any):
+    if typing.get_origin(type_) == JSONB:
+        return True
+    elif typing.get_origin(type_) == typing.Union and type(None) in typing.get_args(
+        type_
+    ):
+        return True
+    return False
 
 
 class Query:
@@ -431,7 +448,7 @@ class DynamicUpdateQueryBuilder(QueryBuilder):
         )
 
         for k in unused.keys():
-            if typing.get_origin(self.model.__fields__[k].type_) == JSONB:
+            if _is_jsonb_type(self.model.__fields__[k].type_):
                 model.__fields__[k].field_info.extra["jsonb"] = True
 
         arg_id = len(self.args) + 1
