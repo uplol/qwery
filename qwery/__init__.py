@@ -274,7 +274,7 @@ class QueryBuilder:
 
 
 def _is_jsonb_type(type_: Any):
-    if typing.get_origin(type_) == JSONB:
+    if typing.get_origin(type_) == JSONB or type_ == JSONB:
         return True
     elif typing.get_origin(type_) == typing.Union:
         args = typing.get_args(type_)
@@ -445,6 +445,9 @@ class DynamicUpdateQueryBuilder(QueryBuilder):
             "DynamicQueryArgs",
         )
         model.__fields__ = {k: self.model.__fields__[k] for k in unused.keys()}
+        for k in unused.keys():
+            if _is_jsonb_type(self.model.__fields__[k].type_):
+                model.__fields__[k].field_info.extra["jsonb"] = True
 
         arg_id = len(self.args) + 1
         set_statements = []
