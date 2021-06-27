@@ -1,4 +1,4 @@
-from typing import Optional
+from typing import Optional, Set
 
 from pydantic import BaseModel
 from qwery import JSONB, Model, Query
@@ -18,6 +18,7 @@ class SimplePostgresModel(Model):
     b: str
     c: bool
     d: Optional[str]
+    e: Set[str]
 
 
 class JSONBPostgresModel(Model):
@@ -36,12 +37,12 @@ async def test_postgres_conn(conn):
 
 async def test_postgres_insert(conn):
     fn = Query(SimplePostgresModel).insert().execute()
-    await fn(conn, a=1, b="test", c=True, d=None)
+    await fn(conn, a=1, b="test", c=True, d=None, e=["a", "b", "c"])
 
 
 async def test_postgres_dynamic_update(conn):
     fn = Query(SimplePostgresModel).insert().execute()
-    await fn(conn, a=13, b="test", c=True, d=None)
+    await fn(conn, a=13, b="test", c=True, d=None, e=[])
 
     fn = (
         Query(SimplePostgresModel)
@@ -50,11 +51,12 @@ async def test_postgres_dynamic_update(conn):
         .returning()
         .fetch_one()
     )
-    res = await fn(conn, a=13, b="test2", c=False, d="yeet gang 420")
+    res = await fn(conn, a=13, b="test2", c=False, d="yeet gang 420", e=["a", "b", "c"])
     assert res.a == 13
     assert res.b == "test2"
     assert res.c is False
     assert res.d == "yeet gang 420"
+    assert res.e == {"a", "b", "c"}
 
 
 async def test_postgres_jsonb(conn):

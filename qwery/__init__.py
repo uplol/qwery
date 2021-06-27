@@ -443,12 +443,8 @@ class DynamicUpdateQueryBuilder(QueryBuilder):
 
         model = create_model(
             "DynamicQueryArgs",
-            **{k: (self.model.__fields__[k].type_, ...) for k in unused.keys()},
         )
-
-        for k in unused.keys():
-            if _is_jsonb_type(self.model.__fields__[k].type_):
-                model.__fields__[k].field_info.extra["jsonb"] = True
+        model.__fields__ = {k: self.model.__fields__[k] for k in unused.keys()}
 
         arg_id = len(self.args) + 1
         set_statements = []
