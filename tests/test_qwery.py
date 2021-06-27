@@ -110,3 +110,7 @@ def test_update_query_builder(builder):
         builder.update(a="{a}", b="{b}", c="my_expr()").sql
         == "UPDATE test SET a = $1, b = $2, c = my_expr()"
     )
+
+
+def test_dynamic_update_query_builder(builder):
+    assert builder.dynamic_update().where("x = {y}").sql == "WHERE x = $1"

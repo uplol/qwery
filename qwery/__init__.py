@@ -79,27 +79,26 @@ class Method:
             result.append(value)
         return result
 
-    @property
-    def sql(self):
-        return self._query.sql
-
 
 class ExecuteMethod(Method):
     async def __call__(self, conn, **kwargs):
         args = self._process_arguments(arguments=kwargs)
-        await conn.execute(self.sql, *args)
+        sql, extra_args = self._query._generate_sql(arguments=kwargs)
+        await conn.execute(sql, *args, *extra_args)
 
 
 class PrepareMethod(Method):
     async def __call__(self, conn, **kwargs):
         args = self._process_arguments(arguments=kwargs)
-        return await conn.prepare(self.sql, *args)
+        sql, extra_args = self._query._generate_sql(arguments=kwargs)
+        return await conn.prepare(sql, *args, *extra_args)
 
 
 class FetchOneMethod(Method):
     async def __call__(self, conn, **kwargs):
         args = self._process_arguments(arguments=kwargs)
-        result = await conn.fetchrow(self.sql, *args)
+        sql, extra_args = self._query._generate_sql(arguments=kwargs)
+        result = await conn.fetchrow(sql, *args, *extra_args)
         if not result:
             raise ModelNotFound
         return self._query.model(**dict(result))
@@ -114,12 +113,14 @@ class FetchAllMethod(Method):
 
     async def rows(self, conn, **kwargs):
         args = self._process_arguments(arguments=kwargs)
-        for i in await conn.fetch(self.sql, *args):
+        sql, extra_args = self._query._generate_sql(arguments=kwargs)
+        for i in await conn.fetch(sql, *args, *extra_args):
             yield i
 
     async def cursor(self, conn, **kwargs):
         args = self._process_arguments(arguments=kwargs)
-        async for i in conn.cursor(self.sql, *args):
+        sql, extra_args = self._query._generate_sql(arguments=kwargs)
+        async for i in conn.cursor(sql, *args, *extra_args):
             yield self._query.model(**dict(i))
 
 
@@ -152,6 +153,9 @@ class QueryBuilder:
     # Whether this query as it stands will return any data (either SELECT, or
     #  we have some RETURNING clause)
     returns_data: bool = False
+
+    def _generate_sql(self, arguments) -> Tuple[str, List[Any]]:
+        return self.sql, []
 
     def _with_sql(self: QueryBuilderT, contents) -> QueryBuilderT:
         if self.sql:
@@ -290,6 +294,9 @@ class Query:
             model=self.model, sql=f"DELETE FROM {self.model.Meta.table_name}"
         )
 
+    def dynamic_update(self) -> "DynamicUpdateQueryBuilder":
+        return DynamicUpdateQueryBuilder(model=self.model, sql="")
+
     def update(self, *args, **kwargs) -> "UpdateQueryBuilder":
         builder = UpdateQueryBuilder(model=self.model, sql="")
 
@@ -394,6 +401,48 @@ class DeleteQueryBuilder(QueryBuilder):
 class UpdateQueryBuilder(QueryBuilder):
     where = _where_mixin_fn
     returning = _returning_mixin_fn
+
+
+class DynamicUpdateQueryBuilder(QueryBuilder):
+    where = _where_mixin_fn
+    returning = _returning_mixin_fn
+
+    def build_argument_model(self):
+        model = create_model(
+            f"{self.model.__name__}QueryArgs",
+            **{arg.name: (arg.type, ...) for arg in self.args},
+        )
+
+        for arg in self.args:
+            if typing.get_origin(arg.type) == JSONB:
+                model.__fields__[arg.name].field_info.extra["jsonb"] = True
+        return model
+
+    def _generate_sql(self, arguments) -> str:
+        arg_names = {i.name for i in self.args}
+        unused = {k: v for k, v in arguments.items() if k not in arg_names}
+
+        model = create_model(
+            "DynamicQueryArgs",
+            **{k: (self.model.__fields__[k].type_, ...) for k in unused.keys()},
+        )
+
+        for k in unused.keys():
+            if typing.get_origin(self.model.__fields__[k].type_) == JSONB:
+                model.__fields__[k].field_info.extra["jsonb"] = True
+
+        arg_id = len(self.args) + 1
+        set_statements = []
+        for k in unused.keys():
+            set_statements.append(f"{k}=${arg_id}")
+            arg_id += 1
+
+        inst = model(**unused)
+
+        return (
+            f"UPDATE {self.model.Meta.table_name} SET {', '.join(set_statements)} {self.sql}",
+            [getattr(inst, k) for k in unused.keys()],
+        )
 
 
 class InsertQueryBuilder(QueryBuilder):

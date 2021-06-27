@@ -37,6 +37,23 @@ async def test_postgres_insert(conn):
     await fn(conn, a=1, b="test", c=True)
 
 
+async def test_postgres_dynamic_update(conn):
+    fn = Query(SimplePostgresModel).insert().execute()
+    await fn(conn, a=13, b="test", c=True)
+
+    fn = (
+        Query(SimplePostgresModel)
+        .dynamic_update()
+        .where("a = {.a}")
+        .returning()
+        .fetch_one()
+    )
+    res = await fn(conn, a=13, b="test2", c=False)
+    assert res.a == 13
+    assert res.b == "test2"
+    assert res.c is False
+
+
 async def test_postgres_jsonb(conn):
     fn = Query(JSONBPostgresModel).insert().returning().fetch_one()
     test_obj = {"a": 1, "b": "b", "c": True}
