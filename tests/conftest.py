@@ -12,7 +12,7 @@ _pool = None
 
 TESTING_TABLES = {
     "simple": """
-        CREATE TABLE simple (a BIGINT, b TEXT, c BOOL);
+        CREATE TABLE simple (a BIGINT NOT NULL, b TEXT NOT NULL, c BOOL NOT NULL, d TEXT);
     """,
     "test_jsonb": """
         CREATE TABLE test_jsonb (a JSONB NOT NULL, b JSONB);

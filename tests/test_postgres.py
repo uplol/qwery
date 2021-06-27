@@ -17,6 +17,7 @@ class SimplePostgresModel(Model):
     a: int
     b: str
     c: bool
+    d: Optional[str]
 
 
 class JSONBPostgresModel(Model):
@@ -35,12 +36,12 @@ async def test_postgres_conn(conn):
 
 async def test_postgres_insert(conn):
     fn = Query(SimplePostgresModel).insert().execute()
-    await fn(conn, a=1, b="test", c=True)
+    await fn(conn, a=1, b="test", c=True, d=None)
 
 
 async def test_postgres_dynamic_update(conn):
     fn = Query(SimplePostgresModel).insert().execute()
-    await fn(conn, a=13, b="test", c=True)
+    await fn(conn, a=13, b="test", c=True, d=None)
 
     fn = (
         Query(SimplePostgresModel)
@@ -49,10 +50,11 @@ async def test_postgres_dynamic_update(conn):
         .returning()
         .fetch_one()
     )
-    res = await fn(conn, a=13, b="test2", c=False)
+    res = await fn(conn, a=13, b="test2", c=False, d="yeet gang 420")
     assert res.a == 13
     assert res.b == "test2"
     assert res.c is False
+    assert res.d == "yeet gang 420"
 
 
 async def test_postgres_jsonb(conn):

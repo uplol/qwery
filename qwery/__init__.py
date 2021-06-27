@@ -276,10 +276,9 @@ class QueryBuilder:
 def _is_jsonb_type(type_: Any):
     if typing.get_origin(type_) == JSONB:
         return True
-    elif typing.get_origin(type_) == typing.Union and type(None) in typing.get_args(
-        type_
-    ):
-        return True
+    elif typing.get_origin(type_) == typing.Union:
+        args = typing.get_args(type_)
+        return type(None) in args and any(typing.get_origin(i) == JSONB for i in args)
     return False
 
 
