@@ -165,7 +165,7 @@ class QueryBuilder:
     returns_data: bool = False
 
     def _generate_sql(self, arguments) -> Tuple[str, List[Any]]:
-        return self.sql, []
+        return self.sql.format(**arguments), []
 
     def _with_sql(self: QueryBuilderT, contents) -> QueryBuilderT:
         if self.sql:
@@ -218,6 +218,10 @@ class QueryBuilder:
                 type = typing.get_type_hints(self.model)[field_contents]
 
             if typehint:
+                if typehint == "raw":
+                    output_contents += f"{{{{{field_contents}}}}}"
+                    continue
+
                 type = SUPPORTED_ARGUMENT_TYPE_HINTS[typehint.strip()]
 
             arg_ref, self = self._with_arg(field_contents, type_of=type)
