@@ -219,7 +219,7 @@ class QueryBuilder:
 
             if typehint:
                 if typehint == "raw":
-                    output_contents += f"{{{{{field_contents}}}}}"
+                    output_contents += f"{{{field_contents}}}"
                     continue
 
                 type = SUPPORTED_ARGUMENT_TYPE_HINTS[typehint.strip()]
