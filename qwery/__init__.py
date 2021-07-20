@@ -72,7 +72,7 @@ def _process_argument_model_instance(inst) -> List[Any]:
                 value = json.dumps(None)
             elif value is None:
                 value = value
-            elif isinstance(value, dict):
+            elif isinstance(value, (dict, str, int, bool)):
                 value = json.dumps(value)
             else:
                 value = value.json()
