@@ -80,6 +80,9 @@ def _process_argument_model_instance(inst) -> List[Any]:
     return result
 
 
+ModelT = TypeVar("ModelT")
+
+
 class Method:
     def __init__(self, query):
         self._query = query
@@ -104,8 +107,8 @@ class PrepareMethod(Method):
         return await conn.prepare(sql, *args, *extra_args)
 
 
-class FetchOneMethod(Method):
-    async def __call__(self, conn, **kwargs):
+class FetchOneMethod(Method, Generic[ModelT]):
+    async def __call__(self, conn, **kwargs) -> ModelT:
         args = self._process_arguments(arguments=kwargs)
         sql, extra_args = self._query._generate_sql(arguments=kwargs)
         result = await conn.fetchrow(sql, *args, *extra_args)
@@ -114,11 +117,11 @@ class FetchOneMethod(Method):
         return self._query.model(**dict(result))
 
 
-class FetchAllMethod(Method):
-    async def __call__(self, conn, **kwargs):
+class FetchAllMethod(Method, Generic[ModelT]):
+    async def __call__(self, conn, **kwargs) -> List[ModelT]:
         return [self._query.model(**dict(i)) async for i in self.rows(conn, **kwargs)]
 
-    async def tuples(self, conn, **kwargs):
+    async def tuples(self, conn, **kwargs) -> List[Tuple]:
         return [tuple(i) async for i in self.rows(conn, **kwargs)]
 
     async def rows(self, conn, **kwargs):
@@ -144,7 +147,7 @@ SUPPORTED_ARGUMENT_TYPE_HINTS = {
 
 
 @dataclass(frozen=True)
-class QueryBuilder:
+class QueryBuilder(Generic[ModelT]):
     @dataclass(frozen=True)
     class QueryArgument:
         # The argument name which will be used to fetch an argument value from the
@@ -245,14 +248,14 @@ class QueryBuilder:
         sql, self = self._parse_arguments(sql)
         return self._with_sql(sql)
 
-    def fetch_one(self) -> FetchOneMethod:
+    def fetch_one(self) -> FetchOneMethod[ModelT]:
         if self.returns_data is False:
             raise ValueError(
                 "cannot call fetch_one on a query that does not return data"
             )
         return FetchOneMethod(self)
 
-    def fetch_all(self) -> FetchAllMethod:
+    def fetch_all(self) -> FetchAllMethod[ModelT]:
         if self.returns_data is False:
             raise ValueError(
                 "cannot call fetch_one on a query that does not return data"
@@ -286,11 +289,11 @@ def _is_jsonb_type(type_: Any):
     return False
 
 
-class Query:
+class Query(Generic[ModelT]):
     def __init__(self, model):
         self.model = model
 
-    def select(self, *, selection=None, alias=None) -> "SelectQueryBuilder":
+    def select(self, *, selection=None, alias=None) -> "SelectQueryBuilder[ModelT]":
         field_prefix = alias + "." if alias else ""
 
         if not selection:
@@ -312,16 +315,16 @@ class Query:
             returns_data=True,
         )
 
-    def delete(self) -> "DeleteQueryBuilder":
-        return DeleteQueryBuilder(
+    def delete(self) -> "DeleteQueryBuilder[ModelT]":
+        return DeleteQueryBuilder[ModelT](
             model=self.model, sql=f"DELETE FROM {self.model.Meta.table_name}"
         )
 
-    def dynamic_update(self) -> "DynamicUpdateQueryBuilder":
-        return DynamicUpdateQueryBuilder(model=self.model, sql="")
+    def dynamic_update(self) -> "DynamicUpdateQueryBuilder[ModelT]":
+        return DynamicUpdateQueryBuilder[ModelT](model=self.model, sql="")
 
-    def update(self, *args, **kwargs) -> "UpdateQueryBuilder":
-        builder = UpdateQueryBuilder(model=self.model, sql="")
+    def update(self, *args, **kwargs) -> "UpdateQueryBuilder[ModelT]":
+        builder = UpdateQueryBuilder[ModelT](model=self.model, sql="")
 
         set_statements = []
         for arg in args:
@@ -340,13 +343,13 @@ class Query:
 
     def insert(
         self, *, exclude: Optional[Set[str]] = None, **kwargs
-    ) -> "InsertQueryBuilder":
+    ) -> "InsertQueryBuilder[ModelT]":
         """
         Constructs an insert query out of all fields in the model. Any fields in
         `excluded` will be skipped. Any kwargs passed will be treated as additional
         field setters with expressions.
         """
-        builder = InsertQueryBuilder(model=self.model, sql="")
+        builder = InsertQueryBuilder[ModelT](model=self.model, sql="")
 
         args = {}
         for field_name in self.model.__fields__.keys():
@@ -381,7 +384,7 @@ def _where_mixin_fn(self: QueryBuilderT, query: str) -> QueryBuilderT:
     return self._with_sql(f"WHERE {query}")
 
 
-class SelectQueryBuilder(QueryBuilder):
+class SelectQueryBuilder(QueryBuilder, Generic[ModelT]):
     where = _where_mixin_fn
 
     def group_by(self: QueryBuilderT, target) -> QueryBuilderT:
@@ -416,17 +419,17 @@ class SelectQueryBuilder(QueryBuilder):
         return self._with_sql(f"{direction}JOIN {target_model} ON {on}")
 
 
-class DeleteQueryBuilder(QueryBuilder):
+class DeleteQueryBuilder(QueryBuilder, Generic[ModelT]):
     where = _where_mixin_fn
     returning = _returning_mixin_fn
 
 
-class UpdateQueryBuilder(QueryBuilder):
+class UpdateQueryBuilder(QueryBuilder, Generic[ModelT]):
     where = _where_mixin_fn
     returning = _returning_mixin_fn
 
 
-class DynamicUpdateQueryBuilder(QueryBuilder):
+class DynamicUpdateQueryBuilder(QueryBuilder, Generic[ModelT]):
     where = _where_mixin_fn
     returning = _returning_mixin_fn
 
@@ -441,11 +444,11 @@ class DynamicUpdateQueryBuilder(QueryBuilder):
                 model.__fields__[arg.name].field_info.extra["jsonb"] = True
         return model
 
-    def _generate_sql(self, arguments) -> str:
+    def _generate_sql(self, arguments) -> Tuple[str, List[Any]]:
         arg_names = {i.name for i in self.args}
         unused = {k: v for k, v in arguments.items() if k not in arg_names}
 
-        model = create_model(
+        model: Any = create_model(
             "DynamicQueryArgs",
         )
         model.__fields__ = {k: self.model.__fields__[k] for k in unused.keys()}
@@ -468,7 +471,7 @@ class DynamicUpdateQueryBuilder(QueryBuilder):
         )
 
 
-class InsertQueryBuilder(QueryBuilder):
+class InsertQueryBuilder(QueryBuilder, Generic[ModelT]):
     returning = _returning_mixin_fn
 
     def on_conflict(
