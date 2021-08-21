@@ -12,10 +12,21 @@ _pool = None
 
 TESTING_TABLES = {
     "simple": """
-        CREATE TABLE simple (a BIGINT NOT NULL, b TEXT NOT NULL, c BOOL NOT NULL, d TEXT, e TEXT[] NOT NULL);
+        CREATE TABLE IF NOT EXISTS simple (
+            a BIGINT NOT NULL,
+            b TEXT NOT NULL,
+            c BOOL NOT NULL,
+            d TEXT,
+            e TEXT[] NOT NULL
+        );
     """,
     "test_jsonb": """
-        CREATE TABLE test_jsonb (a JSONB NOT NULL, b JSONB);
+        CREATE TABLE IF NOT EXISTS test_jsonb (a JSONB NOT NULL, b JSONB);
+    """,
+    "bad_jsonb": """
+        CREATE TABLE IF NOT EXISTS bad_jsonb (a JSONB NOT NULL);
+        INSERT INTO bad_jsonb VALUES ('{}');
+        INSERT INTO bad_jsonb VALUES ('{"a":1,"b":"2","c":true}');
     """,
 }
 

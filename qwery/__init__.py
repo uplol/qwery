@@ -53,7 +53,13 @@ class JSONB(Generic[JSONContainerType]):
         if isinstance(v, (str, bytes)):
             v = json.loads(v)
         assert field.sub_fields is not None
-        return field.sub_fields[0].validate(v, {}, loc=field.name)[0]
+        if v is JSONB.null:
+            return v
+
+        res, err = field.sub_fields[0].validate(v, {}, loc=field.name)
+        if err is not None:
+            raise err.exc
+        return res
 
 
 @dataclass
@@ -137,9 +143,6 @@ class FetchAllMethod(Method, Generic[ModelT]):
             yield self._query.model(**dict(i))
 
 
-QueryBuilderT = TypeVar("QueryBuilderT", bound="QueryBuilder")
-
-
 SUPPORTED_ARGUMENT_TYPE_HINTS = {
     "int": int,
     "str": str,
@@ -170,14 +173,12 @@ class QueryBuilder(Generic[ModelT]):
     def _generate_sql(self, arguments) -> Tuple[str, List[Any]]:
         return self.sql.format(**arguments), []
 
-    def _with_sql(self: QueryBuilderT, contents) -> QueryBuilderT:
+    def _with_sql(self, contents) -> Any:
         if self.sql:
             contents = " " + contents
         return dataclasses.replace(self, sql=self.sql + contents)
 
-    def _with_arg(
-        self: QueryBuilderT, name: str, type_of: object = Any
-    ) -> Tuple[str, QueryBuilderT]:
+    def _with_arg(self, name: str, type_of: object = Any) -> Any:
         for index, arg in enumerate(self.args):
             if arg.name == name:
                 return f"${index + 1}", self
@@ -193,12 +194,10 @@ class QueryBuilder(Generic[ModelT]):
             ),
         )
 
-    def _with_returns_data(self: QueryBuilderT) -> QueryBuilderT:
+    def _with_returns_data(self: "QueryBuilder[ModelT]") -> "QueryBuilder[ModelT]":
         return dataclasses.replace(self, returns_data=True)
 
-    def _parse_arguments(
-        self: QueryBuilderT, contents: str
-    ) -> Tuple[str, QueryBuilderT]:
+    def _parse_arguments(self, contents: str) -> Tuple[str, Any]:
         format_parts = list(string.Formatter().parse(contents))
 
         # No actual format parts where in the string, so we don't need to do anything
@@ -232,19 +231,23 @@ class QueryBuilder(Generic[ModelT]):
 
         return output_contents, self
 
-    def offset(self: QueryBuilderT, amount: Union[int, str]) -> QueryBuilderT:
+    def offset(
+        self: "QueryBuilder[ModelT]", amount: Union[int, str]
+    ) -> "QueryBuilder[ModelT]":
         if isinstance(amount, str):
             amount, self = self._parse_arguments(amount)
 
         return self._with_sql(f"OFFSET {amount}")
 
-    def limit(self: QueryBuilderT, amount: Union[int, str]) -> QueryBuilderT:
+    def limit(
+        self: "QueryBuilder[ModelT]", amount: Union[int, str]
+    ) -> "QueryBuilder[ModelT]":
         if isinstance(amount, str):
             amount, self = self._parse_arguments(amount)
 
         return self._with_sql(f"LIMIT {amount}")
 
-    def raw(self: QueryBuilderT, sql: str) -> QueryBuilderT:
+    def raw(self: "QueryBuilder[ModelT]", sql: str) -> "QueryBuilder[ModelT]":
         sql, self = self._parse_arguments(sql)
         return self._with_sql(sql)
 
@@ -253,14 +256,14 @@ class QueryBuilder(Generic[ModelT]):
             raise ValueError(
                 "cannot call fetch_one on a query that does not return data"
             )
-        return FetchOneMethod(self)
+        return FetchOneMethod[ModelT](self)
 
     def fetch_all(self) -> FetchAllMethod[ModelT]:
         if self.returns_data is False:
             raise ValueError(
                 "cannot call fetch_one on a query that does not return data"
             )
-        return FetchAllMethod(self)
+        return FetchAllMethod[ModelT](self)
 
     def prepare(self) -> PrepareMethod:
         return PrepareMethod(self)
@@ -309,7 +312,7 @@ class Query(Generic[ModelT]):
         if alias is not None:
             table_name = f"{table_name} {alias}"
 
-        return SelectQueryBuilder(
+        return SelectQueryBuilder[ModelT](
             model=self.model,
             sql=f"SELECT {selection} FROM {table_name}",
             returns_data=True,
@@ -375,35 +378,37 @@ class Query(Generic[ModelT]):
         )
 
 
-def _returning_mixin_fn(self: QueryBuilderT) -> QueryBuilderT:
+def _returning_mixin_fn(self: QueryBuilder[ModelT]) -> QueryBuilder[ModelT]:
     return self._with_sql("RETURNING *")._with_returns_data()
 
 
-def _where_mixin_fn(self: QueryBuilderT, query: str) -> QueryBuilderT:
+def _where_mixin_fn(self: QueryBuilder[ModelT], query: str) -> QueryBuilder[ModelT]:
     query, self = self._parse_arguments(query)
     return self._with_sql(f"WHERE {query}")
 
 
-class SelectQueryBuilder(QueryBuilder, Generic[ModelT]):
+class SelectQueryBuilder(Generic[ModelT], QueryBuilder[ModelT]):
     where = _where_mixin_fn
 
-    def group_by(self: QueryBuilderT, target) -> QueryBuilderT:
+    def group_by(self: QueryBuilder[ModelT], target) -> QueryBuilder[ModelT]:
         target, self = self._parse_arguments(target)
         return self._with_sql(f"GROUP BY {target}")
 
-    def order_by(self: QueryBuilderT, target, *, direction="ASC") -> QueryBuilderT:
+    def order_by(
+        self: QueryBuilder[ModelT], target, *, direction="ASC"
+    ) -> QueryBuilder[ModelT]:
         target, self = self._parse_arguments(target)
         direction, self = self._parse_arguments(direction)
         return self._with_sql(f"ORDER BY {target} {direction}")
 
     def join(
-        self: QueryBuilderT,
+        self: QueryBuilder[ModelT],
         target_model: Union[Model, str],
         on: str,
         *,
         alias: str = None,
         direction: str = None,
-    ) -> QueryBuilderT:
+    ) -> QueryBuilder[ModelT]:
         if not isinstance(target_model, str):
             target_model = target_model.Meta.table_name
 
@@ -419,17 +424,17 @@ class SelectQueryBuilder(QueryBuilder, Generic[ModelT]):
         return self._with_sql(f"{direction}JOIN {target_model} ON {on}")
 
 
-class DeleteQueryBuilder(QueryBuilder, Generic[ModelT]):
+class DeleteQueryBuilder(Generic[ModelT], QueryBuilder[ModelT]):
     where = _where_mixin_fn
     returning = _returning_mixin_fn
 
 
-class UpdateQueryBuilder(QueryBuilder, Generic[ModelT]):
+class UpdateQueryBuilder(Generic[ModelT], QueryBuilder[ModelT]):
     where = _where_mixin_fn
     returning = _returning_mixin_fn
 
 
-class DynamicUpdateQueryBuilder(QueryBuilder, Generic[ModelT]):
+class DynamicUpdateQueryBuilder(Generic[ModelT], QueryBuilder[ModelT]):
     where = _where_mixin_fn
     returning = _returning_mixin_fn
 
@@ -471,11 +476,11 @@ class DynamicUpdateQueryBuilder(QueryBuilder, Generic[ModelT]):
         )
 
 
-class InsertQueryBuilder(QueryBuilder, Generic[ModelT]):
+class InsertQueryBuilder(Generic[ModelT], QueryBuilder[ModelT]):
     returning = _returning_mixin_fn
 
     def on_conflict(
-        self: QueryBuilderT, conflict: str, *, action: str = "DO NOTHING"
-    ) -> QueryBuilderT:
+        self: QueryBuilder[ModelT], conflict: str, *, action: str = "DO NOTHING"
+    ) -> QueryBuilder[ModelT]:
         action, self = self._parse_arguments(action)
         return self._with_sql(f"ON CONFLICT ({conflict}) {action}")

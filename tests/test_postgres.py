@@ -1,6 +1,7 @@
 from typing import Optional, Set
 
-from pydantic import BaseModel
+import pytest
+from pydantic import BaseModel, ValidationError
 from qwery import JSONB, Model, Query
 
 
@@ -27,6 +28,13 @@ class JSONBPostgresModel(Model):
 
     a: JSONB[Optional[EmbeddedData]]
     b: Optional[JSONB[EmbeddedData]]
+
+
+class BadJSONB(Model):
+    class Meta:
+        table_name = "bad_jsonb"
+
+    a: JSONB[EmbeddedData]
 
 
 async def test_postgres_conn(conn):
@@ -62,9 +70,13 @@ async def test_postgres_dynamic_update(conn):
 async def test_postgres_jsonb(conn):
     fn = Query(JSONBPostgresModel).insert().returning().fetch_one()
     test_obj = {"a": 1, "b": "b", "c": True}
-    obj = await fn(conn, a=test_obj, b={"yes": "works"})
+
+    with pytest.raises(ValidationError):
+        await fn(conn, a=test_obj, b={"yes": "works"})
+
+    obj = await fn(conn, a=test_obj, b=test_obj)
     assert obj.a == test_obj
-    assert obj.b["yes"] == "works"
+    assert obj.b == test_obj
 
     obj2 = await fn(conn, a=test_obj, b=None)
     assert obj2.b is None
@@ -90,3 +102,9 @@ async def test_postgres_jsonb_dynamic_update(conn):
     fn = Query(JSONBPostgresModel).dynamic_update().returning().fetch_one()
     obj = await fn(conn, b=EmbeddedData(a=2, b="3", c=True))
     assert obj.b == {"a": 2, "b": "3", "c": True}
+
+
+async def test_postgres_bad_jsonb(conn):
+    fn = Query(BadJSONB).select().fetch_all()
+    with pytest.raises(ValidationError):
+        await fn(conn)
