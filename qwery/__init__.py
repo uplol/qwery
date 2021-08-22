@@ -1,8 +1,10 @@
+import dataclasses
 import json
 import string
 import typing
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import (
+    TYPE_CHECKING,
     Any,
     Callable,
     Dict,
@@ -11,14 +13,12 @@ from typing import (
     Optional,
     Set,
     Tuple,
-    Type,
     TypeVar,
     Union,
 )
 
 from pydantic import BaseModel, create_model
 from pydantic.fields import ModelField
-from pydantic.json import pydantic_encoder
 
 
 class ModelNotFound(Exception):
@@ -29,14 +29,21 @@ class ModelValidationError(Exception):
     pass
 
 
+class ModelMeta:
+    table_name: str
+
+
 class Model(BaseModel):
-    pass
+    if TYPE_CHECKING:
+        Meta: ModelMeta
 
 
 JSONContainerType = TypeVar("JSONContainerType")
 
 
 class JSONB(Generic[JSONContainerType]):
+    null = object()
+
     @classmethod
     def __get_validators__(cls):
         yield cls.validate
@@ -45,38 +52,14 @@ class JSONB(Generic[JSONContainerType]):
     def validate(cls, v, field: ModelField):
         if isinstance(v, (str, bytes)):
             v = json.loads(v)
-        return field.sub_fields[0].validate(v, {}, loc=field.name)[0]
+        assert field.sub_fields is not None
+        if v is JSONB.null:
+            return v
 
-
-QueryT = TypeVar("QueryT")
-T = TypeVar("T", bound=Model)
-
-
-def _prepare_sql_args(data, fields):
-    args = []
-    for k, v in fields.items():
-        origin = typing.get_origin(v.type_)
-        if v.splat:
-            args.extend(v.splat(data[k]))
-        elif (
-            origin is JSONB
-            or origin is Union
-            and any(typing.get_origin(i) == JSONB for i in typing.get_args(v.type_))
-        ):
-            if data[k] is None:
-                args.append(None)
-            else:
-                args.append(json.dumps(data[k], default=pydantic_encoder))
-        else:
-            args.append(data[k])
-    return args
-
-
-def _get_field_type(field: ModelField):
-    type_ = field.outer_type_
-    if not field.required:
-        type_ = Optional[type_]
-    return type_
+        res, err = field.sub_fields[0].validate(v, {}, loc=field.name)
+        if err is not None:
+            raise err.exc
+        return res
 
 
 @dataclass
@@ -85,295 +68,419 @@ class Arg:
     splat: Optional[Callable[[Any], List[Any]]]
 
 
+def _process_argument_model_instance(inst) -> List[Any]:
+    result = []
+    for key, field_obj in inst.__fields__.items():
+        value = getattr(inst, key)
+        if "jsonb" in field_obj.field_info.extra:
+            # TODO: null safety here?
+            if value is JSONB.null:
+                value = json.dumps(None)
+            elif value is None:
+                value = value
+            elif isinstance(value, (dict, str, int, bool)):
+                value = json.dumps(value)
+            else:
+                value = value.json()
+        result.append(value)
+    return result
+
+
+ModelT = TypeVar("ModelT")
+
+
 class Method:
     def __init__(self, query):
         self._query = query
+        argument_model = self._query.build_argument_model()
+        self._argument_model = argument_model
 
-    @property
-    def sql(self):
-        return self._query.sql
-
-    def order_by(self, *args, **kwargs) -> "Method":
-        return self.__class__(self._query.order_by(*args, **kwargs))
-
-    def offset(self, *args, **kwargs) -> "Method":
-        return self.__class__(self._query.offset(*args, **kwargs))
-
-    def limit(self, *args, **kwargs) -> "Method":
-        return self.__class__(self._query.limit(*args, **kwargs))
+    def _process_arguments(self, *, arguments: Dict[str, Any]) -> List[Any]:
+        return _process_argument_model_instance(self._argument_model(**arguments))
 
 
 class ExecuteMethod(Method):
     async def __call__(self, conn, **kwargs):
-        sql, args = self._query.build(**kwargs)
-        await conn.execute(sql, *args)
+        args = self._process_arguments(arguments=kwargs)
+        sql, extra_args = self._query._generate_sql(arguments=kwargs)
+        await conn.execute(sql, *args, *extra_args)
 
 
 class PrepareMethod(Method):
     async def __call__(self, conn, **kwargs):
-        sql, args = self._query.build(**kwargs)
-        return await conn.prepare(sql)
+        args = self._process_arguments(arguments=kwargs)
+        sql, extra_args = self._query._generate_sql(arguments=kwargs)
+        return await conn.prepare(sql, *args, *extra_args)
 
 
-class FetchOneMethod(Method):
-    async def __call__(self, conn, **kwargs):
-        sql, args = self._query.build(**kwargs)
-        result = await conn.fetchrow(sql, *args)
+class FetchOneMethod(Method, Generic[ModelT]):
+    async def __call__(self, conn, **kwargs) -> ModelT:
+        args = self._process_arguments(arguments=kwargs)
+        sql, extra_args = self._query._generate_sql(arguments=kwargs)
+        result = await conn.fetchrow(sql, *args, *extra_args)
         if not result:
             raise ModelNotFound
         return self._query.model(**dict(result))
 
 
-class FetchAllMethod(Method):
-    async def __call__(self, conn, **kwargs):
-        sql, args = self._query.build(**kwargs)
-        return [self._query.model(**dict(i)) for i in await conn.fetch(sql, *args)]
+class FetchAllMethod(Method, Generic[ModelT]):
+    async def __call__(self, conn, **kwargs) -> List[ModelT]:
+        return [self._query.model(**dict(i)) async for i in self.rows(conn, **kwargs)]
 
-    async def tuples(self, conn, **kwargs):
-        sql, args = self._query.build(**kwargs)
-        return [tuple(i) for i in await conn.fetch(sql, *args)]
+    async def tuples(self, conn, **kwargs) -> List[Tuple]:
+        return [tuple(i) async for i in self.rows(conn, **kwargs)]
+
+    async def rows(self, conn, **kwargs):
+        args = self._process_arguments(arguments=kwargs)
+        sql, extra_args = self._query._generate_sql(arguments=kwargs)
+        for i in await conn.fetch(sql, *args, *extra_args):
+            yield i
+
+    async def cursor(self, conn, **kwargs):
+        args = self._process_arguments(arguments=kwargs)
+        sql, extra_args = self._query._generate_sql(arguments=kwargs)
+        async for i in conn.cursor(sql, *args, *extra_args):
+            yield self._query.model(**dict(i))
 
 
-class BaseSubQuery(Generic[T]):
-    model: Type[T]
+SUPPORTED_ARGUMENT_TYPE_HINTS = {
+    "int": int,
+    "str": str,
+}
+
+
+@dataclass(frozen=True)
+class QueryBuilder(Generic[ModelT]):
+    @dataclass(frozen=True)
+    class QueryArgument:
+        # The argument name which will be used to fetch an argument value from the
+        #  called kwargs.
+        name: str
+
+        # The underlying type of this argument. This is passed to pydantic for
+        #  validating argument input.
+        type: object
+
+    # The model this query is for
+    model: Any
     sql: str
-    args: Dict[str, Arg]
-    idx: int
+    args: List[QueryArgument] = field(default_factory=list)
 
-    def __init__(self, model: Type[T], sql: str, args: Dict[str, Arg], idx: int):
-        self.model = model
-        self.sql = sql
-        self.args = args
-        self.idx = idx
+    # Whether this query as it stands will return any data (either SELECT, or
+    #  we have some RETURNING clause)
+    returns_data: bool = False
 
-        self._args_model = None
+    def _generate_sql(self, arguments) -> Tuple[str, List[Any]]:
+        return self.sql.format(**arguments), []
 
-    @property
-    def args_model(self):
-        if not self._args_model:
-            value: Any = {k: (v.type_, ...) for k, v in self.args.items()}
-            self._args_model = create_model("ArgsModel", **value)
-        return self._args_model
+    def _with_sql(self, contents) -> Any:
+        if self.sql:
+            contents = " " + contents
+        return dataclasses.replace(self, sql=self.sql + contents)
 
-    def execute(self) -> ExecuteMethod:
-        return ExecuteMethod(self)
+    def _with_arg(self, name: str, type_of: object = Any) -> Any:
+        for index, arg in enumerate(self.args):
+            if arg.name == name:
+                return f"${index + 1}", self
+
+        if typing.get_origin(type_of) == JSONB:
+            pass
+
+        return (
+            f"${len(self.args) + 1}",
+            dataclasses.replace(
+                self,
+                args=self.args + [QueryBuilder.QueryArgument(name=name, type=type_of)],
+            ),
+        )
+
+    def _with_returns_data(self: "QueryBuilder[ModelT]") -> "QueryBuilder[ModelT]":
+        return dataclasses.replace(self, returns_data=True)
+
+    def _parse_arguments(self, contents: str) -> Tuple[str, Any]:
+        format_parts = list(string.Formatter().parse(contents))
+
+        # No actual format parts where in the string, so we don't need to do anything
+        if len(format_parts) == 1 and not format_parts[0][1]:
+            return format_parts[0][0], self
+
+        output_contents = ""
+        for (unrelated_text, field_contents, typehint, y) in format_parts:
+            output_contents += unrelated_text
+            if not field_contents:
+                continue
+
+            type = Any
+
+            if field_contents.startswith("."):
+                assert (
+                    not typehint
+                ), "model field reference arg cannot also have a type hint"
+                field_contents = field_contents[1:]
+                type = typing.get_type_hints(self.model)[field_contents]
+
+            if typehint:
+                if typehint == "raw":
+                    output_contents += f"{{{field_contents}}}"
+                    continue
+
+                type = SUPPORTED_ARGUMENT_TYPE_HINTS[typehint.strip()]
+
+            arg_ref, self = self._with_arg(field_contents, type_of=type)
+            output_contents += arg_ref
+
+        return output_contents, self
+
+    def offset(
+        self: "QueryBuilder[ModelT]", amount: Union[int, str]
+    ) -> "QueryBuilder[ModelT]":
+        if isinstance(amount, str):
+            amount, self = self._parse_arguments(amount)
+
+        return self._with_sql(f"OFFSET {amount}")
+
+    def limit(
+        self: "QueryBuilder[ModelT]", amount: Union[int, str]
+    ) -> "QueryBuilder[ModelT]":
+        if isinstance(amount, str):
+            amount, self = self._parse_arguments(amount)
+
+        return self._with_sql(f"LIMIT {amount}")
+
+    def raw(self: "QueryBuilder[ModelT]", sql: str) -> "QueryBuilder[ModelT]":
+        sql, self = self._parse_arguments(sql)
+        return self._with_sql(sql)
+
+    def fetch_one(self) -> FetchOneMethod[ModelT]:
+        if self.returns_data is False:
+            raise ValueError(
+                "cannot call fetch_one on a query that does not return data"
+            )
+        return FetchOneMethod[ModelT](self)
+
+    def fetch_all(self) -> FetchAllMethod[ModelT]:
+        if self.returns_data is False:
+            raise ValueError(
+                "cannot call fetch_one on a query that does not return data"
+            )
+        return FetchAllMethod[ModelT](self)
 
     def prepare(self) -> PrepareMethod:
         return PrepareMethod(self)
 
-    def fetch_one(self) -> FetchOneMethod:
-        return FetchOneMethod(self)
+    def execute(self) -> ExecuteMethod:
+        return ExecuteMethod(self)
 
-    def fetch_all(self) -> FetchAllMethod:
-        return FetchAllMethod(self)
-
-    def offset(self, amount):
-        return self.__class__(
-            self.model, self.sql + f" OFFSET {amount}", self.args.copy(), self.idx
+    def build_argument_model(self):
+        model = create_model(
+            f"{self.model.__name__}QueryArgs",
+            **{arg.name: (arg.type, ...) for arg in self.args},
         )
 
-    def limit(self, amount):
-        return self.__class__(
-            self.model, self.sql + f" LIMIT {amount}", self.args.copy(), self.idx
-        )
-
-    def returning(self):
-        return self.__class__(
-            self.model, self.sql.strip() + " RETURNING *", self.args.copy(), self.idx
-        )
-
-    def build(self, **kwargs):
-        parsed_kwargs = self.args_model(**kwargs).dict()
-        return self.sql, self.generate_sql_args(parsed_kwargs)
-
-    def generate_sql_args(self, kwargs: Dict[str, Any]) -> List[Any]:
-        return _prepare_sql_args(kwargs, self.args)
+        for arg in self.args:
+            if _is_jsonb_type(arg.type):
+                model.__fields__[arg.name].field_info.extra["jsonb"] = True
+        return model
 
 
-def _where(
-    query: BaseSubQuery[T], raw_where_query: str
-) -> Tuple[Type[T], str, Dict[str, Arg], int]:
-    sql = query.sql.strip() + " WHERE "
-
-    idx = query.idx
-    args = query.args.copy()
-    for i, (text, field, _, _) in enumerate(string.Formatter().parse(raw_where_query)):
-        sql += text
-
-        if field:
-            if field.startswith("."):
-                # This field is typed as a reference to the root model
-                field = field[1:]
-                arg = Arg(_get_field_type(query.model.__fields__[field]), None)
-            else:
-                arg = Arg(Any, None)
-
-            if field in args:
-                index = list(args.keys()).index(field)
-                # TODO: tyep check?
-                sql += f"${index + 1}"
-                continue
-
-            args[field] = arg
-            idx += 1
-            sql += f"${idx}"
-
-    return (query.model, sql, args, idx)
+def _is_jsonb_type(type_: Any):
+    if typing.get_origin(type_) == JSONB or type_ == JSONB:
+        return True
+    elif typing.get_origin(type_) == typing.Union:
+        args = typing.get_args(type_)
+        return type(None) in args and any(typing.get_origin(i) == JSONB for i in args)
+    return False
 
 
-class SelectQuery(Generic[T], BaseSubQuery[T]):
-    def where(self, raw_where_query) -> "SelectQuery[T]":
-        return SelectQuery[T](*_where(self, raw_where_query))
-
-    def group_by(self, by) -> "SelectQuery[T]":
-        return SelectQuery[T](
-            self.model, self.sql.strip() + f" GROUP BY {by}", self.args.copy(), self.idx
-        )
-
-    def order_by(self, by, direction="ASC") -> "SelectQuery[T]":
-        return SelectQuery[T](
-            self.model,
-            self.sql.strip() + f" ORDER BY {by} {direction}",
-            self.args.copy(),
-            self.idx,
-        )
-
-    def raw(self, raw) -> "SelectQuery[T]":
-        return SelectQuery[T](
-            self.model, self.sql.strip() + " " + raw, self.args.copy(), self.idx
-        )
-
-    def join(self, other_model, on, alias=None, direction=None) -> "SelectQuery[T]":
-        sql = (
-            self.sql.strip()
-            + f" {direction or ''} JOIN {other_model.Meta.table_name} {alias or other_model.Meta.table_name} ON {on}"
-        )
-        return SelectQuery[T](self.model, sql, self.args.copy(), self.idx)
-
-
-class DeleteQuery(Generic[T], BaseSubQuery[T]):
-    def where(self, raw_where_query: str) -> "DeleteQuery[T]":
-        return DeleteQuery(*_where(self, raw_where_query))
-
-
-class UpdateQuery(Generic[T], BaseSubQuery[T]):
-    def where(self, raw_where_query: str) -> "UpdateQuery[T]":
-        return UpdateQuery(*_where(self, raw_where_query))
-
-    def returning(self) -> "UpdateQuery[T]":
-        return UpdateQuery[T](
-            self.model, self.sql.strip() + " RETURNING *", self.args.copy(), self.idx
-        )
-
-
-class InsertQuery(Generic[T], BaseSubQuery[T]):
-    def on_conflict(self, col, action="DO NOTHING") -> "InsertQuery[T]":
-        return InsertQuery[T](
-            self.model,
-            self.sql.strip() + f" ON CONFLICT ({col}) {action}",
-            self.args,
-            self.idx,
-        )
-
-    def returning(self) -> "InsertQuery[T]":
-        return InsertQuery[T](
-            self.model, self.sql.strip() + " RETURNING *", self.args.copy(), self.idx
-        )
-
-
-class DynamicUpdateQuery(Generic[T], BaseSubQuery[T]):
-    def where(self, raw_where_query: str) -> "DynamicUpdateQuery[T]":
-        return DynamicUpdateQuery(*_where(self, raw_where_query))
-
-    def build(self, **kwargs):
-        parsed_kwargs = self.args_model(
-            **{k: kwargs.pop(k) for k in self.args_model.__fields__}
-        ).dict()
-        parts = [f"{k} = ${self.idx + i + 1}" for i, k in enumerate(kwargs.keys())]
-        sql = self.sql.format(dynamic=", ".join(parts))
-
-        kwarg_args = {
-            k: Arg(self.model.__fields__[k].type_, None) for k in kwargs.keys()
-        }
-
-        for k, v in kwargs.items():
-            if isinstance(v, BaseModel) and self.model.__fields__[k].type_ == JSONB:
-                kwargs[k] = v.json()
-
-        args = self.generate_sql_args(parsed_kwargs) + _prepare_sql_args(
-            kwargs, kwarg_args
-        )
-        return sql, args
-
-
-class Query(Generic[T]):
-    def __init__(self, model: Type[T]):
+class Query(Generic[ModelT]):
+    def __init__(self, model):
         self.model = model
 
-    @property
-    def _table_name(self):
-        return self.model.Meta.table_name
+    def select(self, *, selection=None, alias=None) -> "SelectQueryBuilder[ModelT]":
+        field_prefix = alias + "." if alias else ""
 
-    def delete(self) -> DeleteQuery[T]:
-        return DeleteQuery[T](self.model, f"DELETE FROM {self._table_name}", {}, 0)
+        if not selection:
+            selection = ", ".join(
+                [
+                    field_prefix + field_name
+                    for field_name in self.model.__fields__.keys()
+                ]
+            )
 
-    def dynamic_update(self) -> DynamicUpdateQuery[T]:
-        return DynamicUpdateQuery[T](
-            self.model, f"UPDATE {self._table_name} SET {{dynamic}} ", {}, 0
+        table_name = self.model.Meta.table_name
+
+        if alias is not None:
+            table_name = f"{table_name} {alias}"
+
+        return SelectQueryBuilder[ModelT](
+            model=self.model,
+            sql=f"SELECT {selection} FROM {table_name}",
+            returns_data=True,
         )
 
-    def update(self, *fields, **kwargs) -> UpdateQuery[T]:
-        args = {}
-        updates = []
-        idx = 0
+    def delete(self) -> "DeleteQueryBuilder[ModelT]":
+        return DeleteQueryBuilder[ModelT](
+            model=self.model, sql=f"DELETE FROM {self.model.Meta.table_name}"
+        )
 
-        for field in fields:
-            args[field] = Arg(_get_field_type(self.model.__fields__[field]), None)
-            idx += 1
-            updates.append(f"{field} = ${idx}")
+    def dynamic_update(self) -> "DynamicUpdateQueryBuilder[ModelT]":
+        return DynamicUpdateQueryBuilder[ModelT](model=self.model, sql="")
 
-        for k, v in kwargs.items():
-            updates.append(f"{k} = {v}")
+    def update(self, *args, **kwargs) -> "UpdateQueryBuilder[ModelT]":
+        builder = UpdateQueryBuilder[ModelT](model=self.model, sql="")
 
-        return UpdateQuery[T](
-            self.model, f"UPDATE {self._table_name} SET {', '.join(updates)}", args, idx
+        set_statements = []
+        for arg in args:
+            arg_ref, builder = builder._with_arg(
+                arg, typing.get_type_hints(self.model)[arg]
+            )
+            set_statements.append(f"{arg} = {arg_ref}")
+
+        for key, value in kwargs.items():
+            value, builder = builder._parse_arguments(value)
+            set_statements.append(f"{key} = {value}")
+
+        return builder._with_sql(
+            f"UPDATE {self.model.Meta.table_name} SET {', '.join(set_statements)}"
         )
 
     def insert(
-        self, body: bool = False, ignore: Optional[Set[str]] = None
-    ) -> InsertQuery[T]:
-        if body:
-            assert ignore is None, "cannot use ignore with body = True"
+        self, *, exclude: Optional[Set[str]] = None, **kwargs
+    ) -> "InsertQueryBuilder[ModelT]":
+        """
+        Constructs an insert query out of all fields in the model. Any fields in
+        `excluded` will be skipped. Any kwargs passed will be treated as additional
+        field setters with expressions.
+        """
+        builder = InsertQueryBuilder[ModelT](model=self.model, sql="")
 
-            def f(inst: Dict[str, Any]):
-                return inst.values()
+        args = {}
+        for field_name in self.model.__fields__.keys():
+            if exclude and field_name in exclude:
+                continue
 
-            camel = ""
-            for char in self.model.__name__:
-                if camel and char.isupper():
-                    camel += "_" + char.lower()
-                else:
-                    camel += char.lower()
+            if field_name in kwargs:
+                continue
 
-            f.__name__ = f"{camel}_splat"
-            fields = list(self.model.__fields__.keys())
-            args = {camel: Arg(self.model, f)}
-        else:
-            fields = [
-                k for k in self.model.__fields__.keys() if not ignore or k not in ignore
-            ]
+            arg_ref, builder = builder._with_arg(
+                field_name, typing.get_type_hints(self.model)[field_name]
+            )
+            args[field_name] = arg_ref
 
-            args = {}
-            for field in fields:
-                args[field] = Arg(_get_field_type(self.model.__fields__[field]), None)
+        for field_name, field_value in kwargs.items():
+            field_value, builder = builder._parse_arguments(field_value)
+            args[field_name] = field_value
 
-        values = ", ".join(f"${idx + 1}" for idx in range(len(fields)))
-        sql = f"INSERT INTO {self._table_name} ({', '.join(fields)}) VALUES ({values})"
-        return InsertQuery[T](self.model, sql, args, len(fields))
-
-    def select(self, raw=None, alias=None) -> SelectQuery[T]:
-        fields = raw or ", ".join(
-            [alias + "." + i if alias else i for i in self.model.__fields__.keys()]
+        fields = ", ".join(args.keys())
+        values = ", ".join(args.values())
+        return builder._with_sql(
+            f"INSERT INTO {self.model.Meta.table_name} ({fields}) VALUES ({values})"
         )
-        sql = f"SELECT {fields} FROM {self._table_name}{' ' + (alias or '')}"
-        return SelectQuery[T](self.model, sql, {}, 0)
+
+
+def _returning_mixin_fn(self: QueryBuilder[ModelT]) -> QueryBuilder[ModelT]:
+    return self._with_sql("RETURNING *")._with_returns_data()
+
+
+def _where_mixin_fn(self: QueryBuilder[ModelT], query: str) -> QueryBuilder[ModelT]:
+    query, self = self._parse_arguments(query)
+    return self._with_sql(f"WHERE {query}")
+
+
+class SelectQueryBuilder(Generic[ModelT], QueryBuilder[ModelT]):
+    where = _where_mixin_fn
+
+    def group_by(self: QueryBuilder[ModelT], target) -> QueryBuilder[ModelT]:
+        target, self = self._parse_arguments(target)
+        return self._with_sql(f"GROUP BY {target}")
+
+    def order_by(
+        self: QueryBuilder[ModelT], target, *, direction="ASC"
+    ) -> QueryBuilder[ModelT]:
+        target, self = self._parse_arguments(target)
+        direction, self = self._parse_arguments(direction)
+        return self._with_sql(f"ORDER BY {target} {direction}")
+
+    def join(
+        self: QueryBuilder[ModelT],
+        target_model: Union[Model, str],
+        on: str,
+        *,
+        alias: str = None,
+        direction: str = None,
+    ) -> QueryBuilder[ModelT]:
+        if not isinstance(target_model, str):
+            target_model = target_model.Meta.table_name
+
+        if alias is not None:
+            target_model += f" {alias}"
+
+        on, self = self._parse_arguments(on)
+
+        direction = direction or ""
+        if direction:
+            direction = direction + " "
+
+        return self._with_sql(f"{direction}JOIN {target_model} ON {on}")
+
+
+class DeleteQueryBuilder(Generic[ModelT], QueryBuilder[ModelT]):
+    where = _where_mixin_fn
+    returning = _returning_mixin_fn
+
+
+class UpdateQueryBuilder(Generic[ModelT], QueryBuilder[ModelT]):
+    where = _where_mixin_fn
+    returning = _returning_mixin_fn
+
+
+class DynamicUpdateQueryBuilder(Generic[ModelT], QueryBuilder[ModelT]):
+    where = _where_mixin_fn
+    returning = _returning_mixin_fn
+
+    def build_argument_model(self):
+        model = create_model(
+            f"{self.model.__name__}QueryArgs",
+            **{arg.name: (arg.type, ...) for arg in self.args},
+        )
+
+        for arg in self.args:
+            if typing.get_origin(arg.type) == JSONB:
+                model.__fields__[arg.name].field_info.extra["jsonb"] = True
+        return model
+
+    def _generate_sql(self, arguments) -> Tuple[str, List[Any]]:
+        arg_names = {i.name for i in self.args}
+        unused = {k: v for k, v in arguments.items() if k not in arg_names}
+
+        model: Any = create_model(
+            "DynamicQueryArgs",
+        )
+        model.__fields__ = {k: self.model.__fields__[k] for k in unused.keys()}
+        for k in unused.keys():
+            if _is_jsonb_type(self.model.__fields__[k].type_):
+                model.__fields__[k].field_info.extra["jsonb"] = True
+
+        arg_id = len(self.args) + 1
+        set_statements = []
+        for k in unused.keys():
+            set_statements.append(f"{k}=${arg_id}")
+            arg_id += 1
+
+        inst = model(**unused)
+        args = _process_argument_model_instance(inst)
+
+        return (
+            f"UPDATE {self.model.Meta.table_name} SET {', '.join(set_statements)} {self.sql}",
+            args,
+        )
+
+
+class InsertQueryBuilder(Generic[ModelT], QueryBuilder[ModelT]):
+    returning = _returning_mixin_fn
+
+    def on_conflict(
+        self: QueryBuilder[ModelT], conflict: str, *, action: str = "DO NOTHING"
+    ) -> QueryBuilder[ModelT]:
+        action, self = self._parse_arguments(action)
+        return self._with_sql(f"ON CONFLICT ({conflict}) {action}")
